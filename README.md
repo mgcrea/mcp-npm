@@ -67,6 +67,7 @@ npm whoami       # if this answers, you are configured
 | `NPM_OTP_MAX_USES`      | no       | Calls one code covers. Defaults to `80`, npm's own guidance.                                                 |
 | `NPM_AUTO_OPEN_BROWSER` | no       | `0` to print the URL instead of launching a browser.                                                         |
 | `NPM_MAX_RETRIES`       | no       | Retry budget for 429/5xx. Defaults to `3`.                                                                   |
+| `NPM_BIN`               | no       | Path to npm's `npm-cli.js` (or an npm executable), for `npm_publish`. Only needed when npm is not on `PATH`. |
 | `NPM_MCP_CONFIG`        | no       | Path to a JSON config file.                                                                                  |
 | `NPM_DEBUG`             | no       | `1` to log to stderr.                                                                                        |
 

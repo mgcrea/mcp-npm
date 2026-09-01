@@ -56,5 +56,5 @@ export const registerTools = (
 
   // Publishing and unpublishing have no read half, so the whole module is
   // behind the flag rather than splitting inside it.
-  if (ctx.allowWrites) registerPublishTools(server, client);
+  if (ctx.allowWrites) registerPublishTools(server, client, ctx);
 };

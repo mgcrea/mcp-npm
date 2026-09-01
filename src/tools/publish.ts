@@ -5,12 +5,17 @@ import { PreconditionError } from "#/client/errors";
 import { packumentPath, type NpmRegistryClient } from "#/client/registry";
 import { isRecord, type Rec } from "#/client/shape";
 import { buildPublishBody, packDirectory, tarballFilename } from "#/client/tarball";
+import type { ToolContext } from "#/tools/index";
 import { confirmArg, dryRunArg, packageArg, versionArg, wrap } from "#/tools/util";
 
 /** One step of an unpublish, reported by `dry_run` before any of it happens. */
 type Step = { step: string; method: string; path: string; note?: string };
 
-export const registerPublishTools = (server: McpServer, client: NpmRegistryClient): void => {
+export const registerPublishTools = (
+  server: McpServer,
+  client: NpmRegistryClient,
+  ctx: ToolContext,
+): void => {
   server.registerTool(
     "npm_publish",
     {
@@ -56,7 +61,9 @@ export const registerPublishTools = (server: McpServer, client: NpmRegistryClien
     },
     async ({ directory, tag, access, dry_run }) =>
       wrap(async () => {
-        const packed = await packDirectory(directory);
+        // npmBin matters only when npm is not on PATH — which is the normal
+        // case for a GUI-spawned server. See resolveNpmCli in client/tarball.ts.
+        const packed = await packDirectory(directory, { npmBin: ctx.config.npmBin });
 
         // Ask before pushing. A version already on npm cannot be replaced, and
         // the error npm returns for a duplicate is far less clear than this.

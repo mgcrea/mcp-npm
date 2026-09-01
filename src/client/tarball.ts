@@ -9,10 +9,12 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { promisify } from "node:util";
+
+import { PreconditionError } from "#/client/errors";
 
 const execFileAsync = promisify(execFile);
 
@@ -48,6 +50,125 @@ export const tarballUrl = (registry: string, name: string, version: string): str
 export type PackOptions = {
   /** Injected in tests so nothing shells out. */
   exec?: (dir: string, destination: string) => Promise<void>;
+  /** An explicit npm CLI path, from NPM_BIN. Wins over every probe below. */
+  npmBin?: string | undefined;
+};
+
+/** How npm's CLI will be invoked, and which rule found it (quoted in errors). */
+export type NpmCli = { command: string; args: string[]; source: string };
+
+export type ResolveNpmCliOptions = {
+  npmBin?: string | undefined;
+  /** The Node running this process. Overridden in tests. */
+  execPath?: string;
+  exists?: (path: string) => boolean;
+};
+
+/**
+ * Find npm's CLI, and prefer running it with the Node we are already inside.
+ *
+ * Spawning bare `npm` is what broke: it resolves through PATH, and a server
+ * spawned by a GUI app inherits launchd's minimal `/usr/bin:/bin` rather than a
+ * shell PATH, so npm is simply not there. It works from a terminal-launched
+ * server, which is exactly why it shipped.
+ *
+ * The obvious repair — an absolute path to the `npm` shim — does not work
+ * either, and fails in a way that looks like a different bug. That shim is a
+ * `#!/usr/bin/env node` script, and there is no `node` on that PATH to run it,
+ * so `spawn npm ENOENT` merely becomes `env: node: No such file or directory`.
+ *
+ * So resolve npm's `npm-cli.js` and hand it to `process.execPath`. That Node
+ * provably exists: we are executing inside it. No shebang, no PATH lookup.
+ */
+export const resolveNpmCli = (opts: ResolveNpmCliOptions = {}): NpmCli => {
+  const execPath = opts.execPath ?? process.execPath;
+  const exists = opts.exists ?? existsSync;
+  const npmBin = opts.npmBin?.trim();
+
+  if (npmBin) {
+    // Validate a PATH-like value here rather than letting it fail at spawn.
+    // A bad `.js` target spawns *successfully* — node exists — and then dies
+    // with a MODULE_NOT_FOUND stack dump that names node's loader internals
+    // instead of the setting the user got wrong. A bare command name is left
+    // alone: it is meant to be resolved through PATH, so an existence check on
+    // it would be meaningless.
+    if (npmBin.includes("/") && !exists(npmBin)) {
+      throw new PreconditionError(`NPM_BIN points at ${npmBin}, which does not exist.`, {
+        npmBin,
+        remedy:
+          "Set NPM_BIN to npm's `npm-cli.js` (usually " +
+          "`<node prefix>/lib/node_modules/npm/bin/npm-cli.js`) or to an npm executable, or " +
+          "unset it to let this server find npm beside the Node it is running under.",
+      });
+    }
+    // A `.js` target is a CLI entrypoint, not an executable — it needs a Node
+    // in front of it for the same shebang reason as everything else here.
+    return npmBin.endsWith(".js")
+      ? { command: execPath, args: [npmBin], source: "NPM_BIN" }
+      : { command: npmBin, args: [], source: "NPM_BIN" };
+  }
+
+  const base = dirname(execPath);
+  const candidates = [
+    // Standard unix layout: node in bin/, npm beside it under lib/.
+    join(base, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+    // An app bundle that ships npm as a sibling of the node binary.
+    join(base, "npm", "bin", "npm-cli.js"),
+    join(base, "node_modules", "npm", "bin", "npm-cli.js"),
+  ];
+  for (const candidate of candidates) {
+    if (exists(candidate)) return { command: execPath, args: [candidate], source: candidate };
+  }
+
+  // Last resort, and the behaviour every terminal-launched install already has.
+  // If PATH has npm, nothing above needed to be true.
+  return { command: "npm", args: [], source: "PATH" };
+};
+
+/**
+ * PATH for the packing child, with the running Node's directory prepended.
+ *
+ * `npm pack` runs the package's own prepack/prepare scripts, so this child is
+ * about to execute the project's build. Under a bare `/usr/bin:/bin` that build
+ * dies the moment it invokes `node`, `tsc` or a package manager — the very next
+ * failure after the one being fixed, and indistinguishable from it to anyone
+ * reading the error.
+ */
+export const packEnv = (
+  execPath: string = process.execPath,
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv => {
+  const execDir = dirname(execPath);
+  const current = env.PATH ?? "";
+  const alreadyThere = current.split(delimiter).includes(execDir);
+  return { ...env, PATH: alreadyThere ? current : `${execDir}${delimiter}${current}` };
+};
+
+/**
+ * Turn a failed spawn into something that names the actual problem.
+ *
+ * A bare `spawn npm ENOENT` says nothing about which of three things to fix,
+ * and the least guessable one — that this process has a PATH the user has never
+ * seen, because a GUI-spawned server does not inherit a shell's — is invisible
+ * unless it is printed. So print it.
+ */
+const npmMissing = (err: unknown, cli: NpmCli): unknown => {
+  const code = (err as { code?: unknown } | undefined)?.code;
+  if (code !== "ENOENT") return err;
+  return new PreconditionError(
+    `Could not run npm to pack the package: ${cli.command} was not found.`,
+    {
+      tried: cli.source,
+      command: cli.command,
+      path: process.env.PATH ?? "",
+      node: process.execPath,
+      remedy:
+        "npm's CLI could not be located. A server started by a GUI app inherits a minimal PATH " +
+        "(often just /usr/bin:/bin) rather than your shell's, so an npm installed by Homebrew or " +
+        "a version manager is not on it. Set NPM_BIN to npm's `npm-cli.js` (or to an npm " +
+        "executable) for this server, or start the server from a shell where `npm` resolves.",
+    },
+  );
 };
 
 /**
@@ -80,10 +201,16 @@ export const packDirectory = async (
     if (opts.exec) {
       await opts.exec(directory, destination);
     } else {
-      await execFileAsync("npm", ["pack", "--silent", "--pack-destination", destination], {
-        cwd: directory,
-        maxBuffer: 64 * 1024 * 1024,
-      });
+      const cli = resolveNpmCli({ npmBin: opts.npmBin });
+      try {
+        await execFileAsync(
+          cli.command,
+          [...cli.args, "pack", "--silent", "--pack-destination", destination],
+          { cwd: directory, env: packEnv(), maxBuffer: 64 * 1024 * 1024 },
+        );
+      } catch (err) {
+        throw npmMissing(err, cli);
+      }
     }
 
     const filename = tarballFilename(name, version);

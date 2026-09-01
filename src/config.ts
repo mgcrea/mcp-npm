@@ -45,6 +45,13 @@ const ConfigSchema = z
     otpMaxUses: z.number().int().min(1).max(500).default(80),
     autoOpenBrowser: z.boolean().default(true),
     otpTimeoutMs: z.number().int().min(1000).max(600_000).default(180_000),
+    /**
+     * An explicit path to npm's CLI, for publishing. Needed when this server is
+     * started by a GUI app: it then inherits a minimal PATH rather than a
+     * shell's, and an npm installed by Homebrew or a version manager is not on
+     * it. Left unset, client/tarball.ts probes for npm beside the running Node.
+     */
+    npmBin: z.string().min(1).optional(),
   })
   .strict()
   .superRefine((cfg, ctx) => {
@@ -89,6 +96,7 @@ const FileConfigSchema = z
     otpTtlSeconds: z.number().int().min(0).max(900).optional(),
     otpMaxUses: z.number().int().min(1).max(500).optional(),
     autoOpenBrowser: z.boolean().optional(),
+    npmBin: z.string().min(1).optional(),
     otpTimeoutMs: z.number().int().min(1000).max(600_000).optional(),
   })
   .strict();
@@ -230,6 +238,7 @@ export const loadConfig = (
     otpTtlSeconds: parseIntOpt(env.NPM_OTP_TTL_SECONDS) ?? file.otpTtlSeconds,
     otpMaxUses: parseIntOpt(env.NPM_OTP_MAX_USES) ?? file.otpMaxUses,
     autoOpenBrowser: parseBool(env.NPM_AUTO_OPEN_BROWSER) ?? file.autoOpenBrowser,
+    npmBin: trimmed(env.NPM_BIN) ?? file.npmBin,
     otpTimeoutMs: parseIntOpt(env.NPM_OTP_TIMEOUT_MS) ?? file.otpTimeoutMs,
   });
 };

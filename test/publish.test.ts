@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { tarballFilename, tarballUrl } from "#/client/tarball";
+import {
+  packDirectory,
+  packEnv,
+  resolveNpmCli,
+  tarballFilename,
+  tarballUrl,
+} from "#/client/tarball";
 import { connect, jsonResponse } from "#test/helpers";
 
 const packument = (versions: string[], distTags: Record<string, string>) => ({
@@ -206,5 +212,129 @@ describe("npm_deprecate_package", () => {
     expect(result.action).toBe("undeprecated");
     const written = harness.bodyAt(1) as { versions: Record<string, object> };
     expect(written.versions["1.0.0"]).not.toHaveProperty("deprecated");
+  });
+});
+
+/**
+ * The regression suite for `spawn npm ENOENT`.
+ *
+ * npm_publish had no coverage at all, and packDirectory — the one code path
+ * that shells out — was never exercised. That is exactly why a bare `npm`
+ * spawn shipped and only failed for GUI-spawned servers, which inherit a
+ * minimal PATH rather than a shell's.
+ */
+/** An `exists` probe that finds exactly one path and nothing else. */
+const only = (wanted: string) => (path: string) => path === wanted;
+
+describe("resolveNpmCli", () => {
+  const NODE = "/opt/homebrew/opt/node@24/bin/node";
+
+  it("runs npm through the Node already running this process, not the shebang", () => {
+    const cli = resolveNpmCli({
+      execPath: NODE,
+      exists: only("/opt/homebrew/opt/node@24/lib/node_modules/npm/bin/npm-cli.js"),
+    });
+
+    // The command must be the Node binary. Handing back the `npm` shim instead
+    // would rely on its `#!/usr/bin/env node` line, and there is no node on the
+    // minimal PATH to satisfy it — which is the trap this whole fix exists for.
+    expect(cli.command).toBe(NODE);
+    expect(cli.args).toEqual(["/opt/homebrew/opt/node@24/lib/node_modules/npm/bin/npm-cli.js"]);
+  });
+
+  it("finds npm shipped as a sibling of the node binary, as an app bundle does", () => {
+    const bundled = "/Applications/Bastion.app/Contents/Resources";
+    const cli = resolveNpmCli({
+      execPath: `${bundled}/node`,
+      exists: only(`${bundled}/npm/bin/npm-cli.js`),
+    });
+
+    expect(cli.command).toBe(`${bundled}/node`);
+    expect(cli.args).toEqual([`${bundled}/npm/bin/npm-cli.js`]);
+  });
+
+  it("lets NPM_BIN override every probe", () => {
+    const cli = resolveNpmCli({
+      npmBin: "/custom/npm/bin/npm-cli.js",
+      execPath: NODE,
+      exists: only("/custom/npm/bin/npm-cli.js"),
+    });
+
+    expect(cli.source).toBe("NPM_BIN");
+    expect(cli.command).toBe(NODE);
+    expect(cli.args).toEqual(["/custom/npm/bin/npm-cli.js"]);
+  });
+
+  it("runs a non-.js NPM_BIN directly rather than feeding it to node", () => {
+    const cli = resolveNpmCli({
+      npmBin: "/usr/local/bin/npm",
+      execPath: NODE,
+      exists: only("/usr/local/bin/npm"),
+    });
+
+    expect(cli.command).toBe("/usr/local/bin/npm");
+    expect(cli.args).toEqual([]);
+  });
+
+  it("rejects a missing NPM_BIN instead of letting node fail on the module", () => {
+    // Spawning this would SUCCEED — node exists — and then die with a
+    // MODULE_NOT_FOUND stack naming node's loader rather than the setting at
+    // fault. Caught here, the message names NPM_BIN.
+    expect(() =>
+      resolveNpmCli({ npmBin: "/nope/npm-cli.js", execPath: NODE, exists: () => false }),
+    ).toThrow(/NPM_BIN points at \/nope\/npm-cli\.js/);
+  });
+
+  it("leaves a bare command name to PATH rather than existence-checking it", () => {
+    const cli = resolveNpmCli({ npmBin: "npm", execPath: NODE, exists: () => false });
+
+    expect(cli.command).toBe("npm");
+  });
+
+  it("falls back to PATH, so a terminal-launched server behaves as before", () => {
+    const cli = resolveNpmCli({ execPath: NODE, exists: () => false });
+
+    expect(cli.command).toBe("npm");
+    expect(cli.args).toEqual([]);
+    expect(cli.source).toBe("PATH");
+  });
+});
+
+describe("packEnv", () => {
+  it("prepends the running Node's directory to a minimal PATH", () => {
+    // npm pack runs the package's prepack/prepare scripts, so the child is
+    // about to run the project's build — which dies on /usr/bin:/bin.
+    const env = packEnv("/opt/homebrew/opt/node@24/bin/node", { PATH: "/usr/bin:/bin" });
+
+    expect(env.PATH).toBe("/opt/homebrew/opt/node@24/bin:/usr/bin:/bin");
+  });
+
+  it("does not duplicate a directory already on PATH", () => {
+    const env = packEnv("/usr/bin/node", { PATH: "/usr/bin:/bin" });
+
+    expect(env.PATH).toBe("/usr/bin:/bin");
+  });
+});
+
+describe("packDirectory", () => {
+  it("packs through the injected exec seam without shelling out", async () => {
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    const dir = mkdtempSync(join(tmpdir(), "npm-mcp-test-"));
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "demo", version: "1.2.3" }));
+
+    const packed = await packDirectory(dir, {
+      exec: async (_dir, destination) => {
+        writeFileSync(join(destination, "demo-1.2.3.tgz"), "tarball-bytes");
+      },
+    });
+
+    expect(packed.name).toBe("demo");
+    expect(packed.version).toBe("1.2.3");
+    expect(packed.filename).toBe("demo-1.2.3.tgz");
+    expect(Buffer.from(packed.data, "base64").toString()).toBe("tarball-bytes");
+    expect(packed.integrity).toMatch(/^sha512-/);
   });
 });
