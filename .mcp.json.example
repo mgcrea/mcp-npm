@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "npm": {
+      "command": "npx",
+      "args": ["-y", "@mgcrea/mcp-npm"],
+      "env": {
+        "NPM_ALLOW_WRITES": ""
+      }
+    }
+  }
+}

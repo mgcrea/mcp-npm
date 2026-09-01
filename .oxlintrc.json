@@ -1,0 +1,22 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "categories": { "correctness": "error", "suspicious": "warn" },
+  "rules": {
+    "no-console": ["error", { "allow": ["error", "warn"] }],
+    "no-underscore-dangle": [
+      "error",
+      {
+        "allow": [
+          "_rev",
+          "_id",
+          "_revisions",
+          "_attachments",
+          "_npmUser",
+          "__GIT_COMMIT__",
+          "__GIT_COMMIT_DATE__"
+        ]
+      }
+    ]
+  },
+  "ignorePatterns": ["dist", "node_modules"]
+}
