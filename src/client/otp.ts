@@ -230,16 +230,14 @@ export const createWebOtpProvider = (opts: WebOtpProviderOptions): OtpProvider =
   };
 
   const mint = async (challenge: WebOtpChallenge, identity: string): Promise<string> => {
-    opts.logger?.warn?.(
-      `[npm-mcp] npm requires a one-time password. Authorize at: ${challenge.authUrl}`,
-    );
+    opts.logger?.warn?.(`npm requires a one-time password. Authorize at: ${challenge.authUrl}`);
     if (autoOpen) {
       try {
         open(challenge.authUrl);
       } catch (err) {
         // A missing `open` binary must not sink the flow — the URL is on stderr
         // and in the tool result, so the user can still click it.
-        opts.logger?.warn?.(`[npm-mcp] could not open a browser: ${String(err)}`);
+        opts.logger?.warn?.(`could not open a browser: ${String(err)}`);
       }
     }
 
@@ -273,7 +271,7 @@ export const createWebOtpProvider = (opts: WebOtpProviderOptions): OtpProvider =
             expiresAt: now() + ttlMs,
             usesRemaining: maxUses,
           });
-          opts.logger?.warn?.("[npm-mcp] one-time password confirmed");
+          opts.logger?.warn?.("one-time password confirmed");
           return body.token;
         }
       }

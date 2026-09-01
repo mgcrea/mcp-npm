@@ -198,6 +198,18 @@ describe("summarizeTrustConfig", () => {
     expect(gitlab.project_path).toBe("g/x");
   });
 
+  it("drops a null environment, which npm sends instead of omitting the key", () => {
+    // Observed live: npm returns `environment: null` on a config with none.
+    const summary = summarizeTrustConfig({
+      id: "abc",
+      type: "github",
+      claims: { repository: "mgcrea/x", workflow_ref: { file: "ci.yml" }, environment: null },
+      permissions: ["createPackage"],
+    }) as Record<string, unknown>;
+
+    expect(summary).not.toHaveProperty("environment");
+  });
+
   it("keeps circleci's raw claims, which have no flat equivalent", () => {
     const circle = summarizeTrustConfig({
       id: "ghi",

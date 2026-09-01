@@ -163,7 +163,7 @@ export class NpmRegistryClient {
     let otp = wantsOtp ? await this.otps.getOtp({ command, identity }) : undefined;
 
     for (;;) {
-      this.logger?.debug?.(`[npm-mcp] ${method} ${path} (attempt ${attempt + 1})`);
+      this.logger?.debug?.(`${method} ${path} (attempt ${attempt + 1})`);
       const token = opts.anonymous ? undefined : await this.tokens.getToken();
 
       const res = await this.fetchImpl(url, {
@@ -214,7 +214,7 @@ export class NpmRegistryClient {
       }
 
       if (res.status === 401 && !opts.anonymous && attempt < this.maxRetries) {
-        this.logger?.warn?.("[npm-mcp] HTTP 401 (not an OTP challenge) — reminting token");
+        this.logger?.warn?.("HTTP 401 (not an OTP challenge) — reminting token");
         this.tokens.invalidate();
         attempt += 1;
         continue;
@@ -223,7 +223,7 @@ export class NpmRegistryClient {
 
       if ((res.status === 429 || res.status >= 500) && attempt < this.maxRetries) {
         const delay = retryAfterMs(res) ?? backoffMs(attempt);
-        this.logger?.warn?.(`[npm-mcp] HTTP ${res.status} — retrying in ${delay}ms`);
+        this.logger?.warn?.(`HTTP ${res.status} — retrying in ${delay}ms`);
         await sleep(delay);
         attempt += 1;
         continue;

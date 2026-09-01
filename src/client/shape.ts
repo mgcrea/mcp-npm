@@ -19,6 +19,13 @@ const num = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
 
 /**
+ * Present and meaningful. npm sends `environment: null` rather than omitting
+ * the key when none is set, so checking for undefined alone leaks a null into
+ * every summary.
+ */
+const set = (value: unknown): boolean => value !== undefined && value !== null;
+
+/**
  * Registry bookkeeping that means nothing outside npm's own storage layer.
  * `_attachments` in particular is the base64 tarball — returning it once would
  * be a multi-megabyte answer to "what version is this".
@@ -230,14 +237,13 @@ export const summarizeTrustConfig = (config: unknown): unknown => {
   const claims = isRecord(config.claims) ? config.claims : {};
   const workflowRef = claims.workflow_ref ?? claims.ci_config_ref_uri;
   const workflow = isRecord(workflowRef) ? workflowRef.file : workflowRef;
-
   return {
     id: config.id,
     provider: config.type,
-    ...(claims.repository !== undefined ? { repository: claims.repository } : {}),
-    ...(claims.project_path !== undefined ? { project_path: claims.project_path } : {}),
-    ...(workflow !== undefined ? { workflow } : {}),
-    ...(claims.environment !== undefined ? { environment: claims.environment } : {}),
+    ...(set(claims.repository) ? { repository: claims.repository } : {}),
+    ...(set(claims.project_path) ? { project_path: claims.project_path } : {}),
+    ...(set(workflow) ? { workflow } : {}),
+    ...(set(claims.environment) ? { environment: claims.environment } : {}),
     ...(config.type === "circleci" ? { claims } : {}),
     ...(config.permissions !== undefined ? { permissions: config.permissions } : {}),
   };
