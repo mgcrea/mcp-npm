@@ -36,6 +36,13 @@ const publisherFields = {
     ),
   repository: z
     .string()
+    // Checked here rather than upstream: npm rejects a bare repo name with a
+    // 400, but only AFTER the OTP has been spent, so the round-trip costs a
+    // browser confirmation to learn something a regex knows for free.
+    .regex(
+      /^[^/\s]+\/[^/\s]+$/,
+      'A GitHub repository claim is "owner/repo" — e.g. "mgcrea/mcp-ovh-api". Not a URL, and not just the repo name.',
+    )
     .optional()
     .describe(
       'GitHub only, required: "owner/repo", e.g. "mgcrea/mcp-ovh-api". Not a URL, and not just ' +
