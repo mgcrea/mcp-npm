@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
+import { NpmRegistryError } from "#/client/errors";
 import { escapePackageName, type NpmRegistryClient } from "#/client/registry";
 import { isConfigured, setupInstructions } from "#/config";
 import type { ToolContext } from "#/tools/index";
@@ -44,9 +45,11 @@ export const registerAuthTools = (
         "came from, which npm account it belongs to, whether two-factor authentication is on, " +
         "whether writes are enabled, and whether a one-time password is currently cached. " +
         "Call this first when a tool you expected is missing — an absent tool means missing " +
-        "configuration rather than a bug. The `trusted_publishing_available` field and its " +
-        "`blockers` list answer, without spending a call, whether the trusted-publisher tools " +
-        "can work at all.",
+        "configuration rather than a bug. `trusted_publishing_available` is true, false, or " +
+        '"unknown" when a probe npm refused left the answer undetermined — read `blockers` ' +
+        "and `undetermined` for which. It is an ACCOUNT-level answer: npm also refuses the trust " +
+        "endpoints per package, which this cannot see, so a true here is not a promise that any " +
+        "particular package will work.",
       inputSchema: z.object({}),
       annotations: { readOnlyHint: true },
     },
@@ -85,6 +88,20 @@ export const registerAuthTools = (
         const twoFactorOff = user.ok && (tfa === null || tfa === false);
 
         const blockers: string[] = [];
+        /**
+         * Checks that could not be RUN, as opposed to checks that failed. The
+         * difference is the whole point: a blocker means "this will not work",
+         * an undetermined check means "this server does not know", and
+         * collapsing the second into neither is how a green status is reported
+         * moments before every trusted-publisher call fails.
+         */
+        const undetermined: string[] = [];
+        if (!user.ok) {
+          undetermined.push(
+            "Two-factor authentication could not be read: npm refused this token on the account " +
+              `profile endpoint (/-/npm/v1/user). ${user.reason}`,
+          );
+        }
         if (twoFactorOff) {
           blockers.push(
             "Two-factor authentication is not enabled on the npm account. Trusted publishing " +
@@ -103,7 +120,21 @@ export const registerAuthTools = (
           configured: true,
           registry: config.registry,
           token_source: config.tokenSource ?? null,
-          token_kind: tokens.ok ? "session" : "granular or limited",
+          // The evidence, not a verdict. These two probes CAN disagree — a token
+          // that lists tokens but is refused the account profile is neither
+          // cleanly session nor cleanly granular — and a confident one-word
+          // label printed over that contradiction is what sends someone off to
+          // reissue a token that was never the problem.
+          token_kind: tokens.ok
+            ? user.ok
+              ? "session"
+              : "session-like: lists tokens, but npm refuses it on the account profile endpoint"
+            : "granular or limited",
+          token_probes: {
+            list_tokens: tokens.ok,
+            account_profile: user.ok,
+            whoami: who.ok,
+          },
           username: who.ok ? (who.value.username ?? null) : null,
           // "unknown" is a real answer, not a bug: npm returns 403 on the
           // profile endpoint for several token kinds. Reported honestly rather
@@ -117,8 +148,16 @@ export const registerAuthTools = (
             expires_in_seconds: Math.round(otp.expiresInMs / 1000),
             uses_remaining: otp.usesRemaining,
           },
-          trusted_publishing_available: blockers.length === 0,
+          // Three states, not two. This only ever meant "no blocker was
+          // DETECTED", and reporting that as `true` while the probe that would
+          // have found one was itself refused is an unearned green light. It is
+          // also per-account only: npm answers 403 per PACKAGE on the trust
+          // endpoints, which nothing here can see, so `true` is never a promise
+          // that a given package will work.
+          trusted_publishing_available:
+            blockers.length > 0 ? false : undetermined.length > 0 ? "unknown" : true,
           ...(blockers.length > 0 ? { blockers } : {}),
+          ...(undetermined.length > 0 ? { undetermined } : {}),
           // Stated even on a healthy server, because it is the constraint people
           // are most likely to design around wrongly.
           note:
@@ -198,18 +237,47 @@ export const registerAuthTools = (
         }
 
         // The probe IS the flow: the client answers the 401 challenge, runs the
-        // browser step and caches the result. We discard the trust config it
-        // returns — the point was the side effect.
-        await client.get(`/-/package/${escapePackageName(pkg)}/trust`, undefined, {
-          otp: "auto",
-          command: "trust",
-        });
+        // browser step and caches the result. Its own success is beside the
+        // point, so it goes through primeOtp and its error is REPORTED rather
+        // than thrown.
+        //
+        // Throwing it — which this did until it was found to be lying — conflates
+        // two unrelated questions. The probe can 403 on the package after a code
+        // has been minted and cached, in which case the answer to "do I have an
+        // OTP?" is yes and re-running only burns a second browser prompt. Or it
+        // can fail before npm ever issues a challenge, in which case the OTP flow
+        // never started and the package permission is the thing to fix. The cache
+        // state distinguishes them; the probe's status code does not.
+        const probeError = await client.primeOtp(() =>
+          client.get(`/-/package/${escapePackageName(pkg)}/trust`, undefined, {
+            otp: "auto",
+            command: "trust",
+          }),
+        );
         const status = client.otpStatus(identity);
         return {
           ok: status.cached,
           method: "web",
           expires_in_seconds: Math.round(status.expiresInMs / 1000),
           uses_remaining: status.usesRemaining,
+          ...(probeError
+            ? {
+                probe: {
+                  package: pkg,
+                  error: probeError instanceof Error ? probeError.message : String(probeError),
+                  ...(probeError instanceof NpmRegistryError && probeError.remedy
+                    ? { remedy: probeError.remedy }
+                    : {}),
+                },
+                note: status.cached
+                  ? "A one-time password WAS obtained and is cached — the failure above is the " +
+                    "probe request itself, after the code was minted, and does not affect it. " +
+                    "It is reported because it will recur on every call against that package."
+                  : "No one-time password was obtained: the probe failed before npm issued a " +
+                    "challenge, so this is not an OTP problem. Retry with a package whose trust " +
+                    "configuration this token can read, or pass `code` from an authenticator app.",
+              }
+            : {}),
         };
       }),
   );

@@ -135,9 +135,26 @@ export class NpmRegistryClient {
    * going to make anyway. There is no way to mint a code proactively — npm only
    * hands out the `authUrl`/`doneUrl` pair inside a 401 — so "prewarming" is
    * always a real request whose challenge we answer once.
+   *
+   * The probe's outcome is NOT the caller's outcome, which is the whole reason
+   * this exists rather than a bare call. A code can be minted, cached and
+   * perfectly usable while the probe request that elicited it still fails
+   * afterwards — a 403 on that particular package, say — and reporting that
+   * failure as an OTP failure sends the caller off to spend a second browser
+   * authorization it already has. Equally, a probe that fails BEFORE npm issues
+   * a challenge mints nothing, and calling that an OTP problem points at the
+   * wrong thing entirely.
+   *
+   * So the error is returned rather than thrown. The caller reports it beside
+   * the cache state, which is what actually answers "do I have a code?".
    */
-  async primeOtp(probe: () => Promise<unknown>): Promise<void> {
-    await probe().catch(() => undefined);
+  async primeOtp(probe: () => Promise<unknown>): Promise<unknown | undefined> {
+    try {
+      await probe();
+      return undefined;
+    } catch (err) {
+      return err;
+    }
   }
 
   async request<T = unknown>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {

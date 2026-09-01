@@ -249,3 +249,72 @@ describe("npm_auth_otp", () => {
     expect(String(result.error)).toMatch(/`code`.*`package`/s);
   });
 });
+
+/**
+ * These cover the failure that made npm_auth_otp lie: it reported the probe
+ * request's own error as though the one-time-password flow had failed. The
+ * expensive half is the second test — a code that WAS minted, reported as a
+ * failure, costs a second browser authorization to discover was never needed.
+ */
+describe("npm_auth_otp", () => {
+  it("reports a probe failure without claiming the OTP flow failed", async () => {
+    // npm's verbatim per-package refusal, arriving before any challenge — so
+    // nothing was minted and this is not an OTP problem at all.
+    const fetchMock = vi
+      .fn<() => Promise<Response>>()
+      .mockResolvedValue(
+        jsonResponse(
+          { success: false, error: "You may not perform that action with these credentials." },
+          { status: 403 },
+        ),
+      );
+    const harness = await connect({ NPM_TOKEN: "t" }, fetchMock, {
+      otpProvider: recordingOtpProvider(),
+    });
+
+    const result = await harness.call("npm_auth_otp", { package: "tydom-client" });
+
+    expect(result.isToolError).toBeFalsy();
+    expect(result.ok).toBe(false);
+    expect((result.probe as Record<string, unknown>).package).toBe("tydom-client");
+    expect(String((result.probe as Record<string, unknown>).error)).toMatch(/403/);
+    expect(String(result.note)).toMatch(/not an OTP problem/i);
+  });
+
+  it("reports ok when a code was minted, even though the probe then failed", async () => {
+    // The 401 challenge mints and caches a code; the retry with it attached is
+    // refused for an unrelated reason. The code is real, cached and usable, and
+    // saying otherwise burns a second authorization for nothing.
+    let call = 0;
+    const fetchMock = vi.fn<() => Promise<Response>>().mockImplementation(async () => {
+      call += 1;
+      if (call === 1) return otpChallenge();
+      return jsonResponse(
+        { error: "You may not perform that action with these credentials." },
+        { status: 403 },
+      );
+    });
+    const otp = recordingOtpProvider(["minted-code"]);
+    const harness = await connect({ NPM_TOKEN: "t" }, fetchMock, { otpProvider: otp });
+
+    const result = await harness.call("npm_auth_otp", { package: "tydom-client" });
+
+    expect(result.isToolError).toBeFalsy();
+    expect(otp.mints).toBe(1);
+    expect(result.ok).toBe(true);
+    expect(result.probe).toBeDefined();
+    expect(String(result.note)).toMatch(/WAS obtained/);
+  });
+
+  it("still caches a code handed over directly, with no network call", async () => {
+    const harness = await connect({ NPM_TOKEN: "t" }, undefined, {
+      otpProvider: recordingOtpProvider(),
+    });
+
+    const result = await harness.call("npm_auth_otp", { code: "123456" });
+
+    expect(result.ok).toBe(true);
+    expect(result.method).toBe("provided");
+    expect(harness.callCount()).toBe(0);
+  });
+});
