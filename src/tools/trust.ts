@@ -287,6 +287,17 @@ export const applyTrustConfig = async (
 };
 
 /**
+ * npm's two ACCOUNT-level 403s, recognised by the same shapes `toError` keys its
+ * remedies off: a granular token with 'Bypass 2FA' set, and two-factor missing
+ * on the account. Matched against npm's own words — message and response body —
+ * never against our remedy prose, which would match itself.
+ */
+const ACCOUNT_LEVEL_403 = /bypass\w*[\s-]*(?:2fa|two.?factor)|gat-bypass2fa|two.?factor|\b2fa\b/i;
+
+const isAccountLevel403 = (err: NpmRegistryError): boolean =>
+  ACCOUNT_LEVEL_403.test(`${err.message} ${JSON.stringify(err.errors ?? "")}`);
+
+/**
  * Conditions that will fail identically for every remaining package. Twenty-five
  * copies of one error is worse than one, and worse still if each costs a browser
  * prompt, so the batch stops and says what to fix.
@@ -300,9 +311,21 @@ const isFatalForBatch = (err: unknown): string | undefined => {
       (err.remedy ?? "")
     );
   }
-  // A 403 is always about the token or the account, never about this package,
-  // so every package left in the batch would fail exactly the same way.
-  if (err instanceof NpmRegistryError && err.status === 403) return err.remedy ?? err.message;
+  // A 403 is NOT automatically account-wide, whatever it looks like. npm answers
+  // the same flat "You may not perform that action with these credentials" for a
+  // single package this token cannot touch as it does for a token that can touch
+  // nothing at all — the two are indistinguishable by status alone, and the
+  // difference is observable: one token can read the trust config of a scoped
+  // package and be refused an unscoped one in the same breath.
+  //
+  // Treating the per-package case as account-wide abandons the rest of a batch
+  // over one package that was always going to fail on its own, and blames the
+  // token while doing it. So only the two shapes that genuinely doom every
+  // remaining package stop the run; the rest are recorded and the batch carries
+  // on, which is what `results` and the per-package `remedy` are for.
+  if (err instanceof NpmRegistryError && err.status === 403 && isAccountLevel403(err)) {
+    return err.remedy ?? err.message;
+  }
   return undefined;
 };
 

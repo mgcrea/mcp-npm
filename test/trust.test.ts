@@ -246,6 +246,46 @@ describe("npm_set_trusted_publisher_batch", () => {
     expect(String(result.reason)).toMatch(/bypass/i);
   });
 
+  /**
+   * The counterpart to the test above, and the one that was missing. npm uses the
+   * same flat 403 for "this token cannot touch THIS package" as for a token that
+   * can touch nothing — observed on one account, where a scoped package's trust
+   * config read fine while an unscoped one was refused. Aborting on the first of
+   * those abandons packages that would have succeeded.
+   */
+  it("keeps going after a 403 that is about one package, not the account", async () => {
+    vi.useFakeTimers();
+    let call = 0;
+    const fetchMock = vi.fn<() => Promise<Response>>().mockImplementation(async () => {
+      call += 1;
+      // Package 2's GET /trust is refused; every other call succeeds.
+      if (call === 3) {
+        return jsonResponse(
+          { success: false, error: "You may not perform that action with these credentials." },
+          { status: 403 },
+        );
+      }
+      return jsonResponse([]);
+    });
+    const harness = await connect({ NPM_TOKEN: "t", NPM_ALLOW_WRITES: "1" }, fetchMock, {
+      otpProvider: recordingOtpProvider(),
+    });
+
+    const pending = harness.call("npm_set_trusted_publisher_batch", {
+      packages: packages.slice(0, 4),
+      ...GITHUB_ARGS,
+    });
+    await vi.advanceTimersByTimeAsync(2000 * 4);
+    const result = await pending;
+
+    expect(result.aborted_after).toBeUndefined();
+    expect(result.remaining).toBeUndefined();
+    const summary = result.summary as Record<string, number>;
+    expect(summary.requested).toBe(4);
+    expect(summary.failed).toBe(1);
+    expect(summary.created).toBe(3);
+  });
+
   it("caps the batch so a full run stays inside npm's cooldown window", async () => {
     const harness = await connect({ NPM_TOKEN: "t", NPM_ALLOW_WRITES: "1" });
 
