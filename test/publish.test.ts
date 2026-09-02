@@ -337,4 +337,31 @@ describe("packDirectory", () => {
     expect(Buffer.from(packed.data, "base64").toString()).toBe("tarball-bytes");
     expect(packed.integrity).toMatch(/^sha512-/);
   });
+
+  // A scoped package has TWO names for one tarball, and they differ: `npm pack`
+  // flattens the scope into the file it writes (`mgcrea-demo-1.2.3.tgz`) while
+  // the registry's dist.tarball drops it (`demo-1.2.3.tgz`). Reading the file
+  // back under the registry-facing name is an ENOENT that only ever reproduces
+  // on a scoped package, which is why the unscoped case above missed it.
+  it("finds the tarball npm wrote for a scoped package, not the one it publishes as", async () => {
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    const dir = mkdtempSync(join(tmpdir(), "npm-mcp-test-"));
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "@mgcrea/demo", version: "1.2.3" }),
+    );
+
+    const packed = await packDirectory(dir, {
+      exec: async (_dir, destination) => {
+        writeFileSync(join(destination, "mgcrea-demo-1.2.3.tgz"), "scoped-bytes");
+      },
+    });
+
+    expect(packed.name).toBe("@mgcrea/demo");
+    expect(packed.filename).toBe("demo-1.2.3.tgz");
+    expect(Buffer.from(packed.data, "base64").toString()).toBe("scoped-bytes");
+  });
 });

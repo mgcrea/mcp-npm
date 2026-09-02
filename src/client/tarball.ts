@@ -9,7 +9,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -213,8 +213,21 @@ export const packDirectory = async (
       }
     }
 
+    // Two different names for one tarball. `npm pack` flattens a scope into the
+    // file it writes — `@mgcrea/mcp-ovh` becomes `mgcrea-mcp-ovh-1.0.0.tgz` —
+    // while the registry's `dist.tarball` drops the scope entirely, as
+    // `/@mgcrea/mcp-ovh/-/mcp-ovh-1.0.0.tgz`. `tarballFilename` produces the
+    // registry-facing one and must keep doing so, so the file on disk is found
+    // by looking rather than by predicting npm's rules.
     const filename = tarballFilename(name, version);
-    const bytes = readFileSync(join(destination, filename));
+    const written = readdirSync(destination).filter((entry) => entry.endsWith(".tgz"));
+    if (written.length !== 1) {
+      throw new Error(
+        `npm pack wrote ${written.length} tarballs into ${destination}, expected exactly one` +
+          (written.length ? `: ${written.join(", ")}` : "."),
+      );
+    }
+    const bytes = readFileSync(join(destination, written[0] as string));
 
     return {
       manifest,
