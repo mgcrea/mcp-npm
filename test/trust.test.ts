@@ -4,7 +4,7 @@ import { connect, jsonResponse, otpChallenge, recordingOtpProvider } from "#test
 
 const GITHUB_ARGS = {
   provider: "github",
-  repository: "mgcrea/mcp-ovh-api",
+  repository: "mgcrea/mcp-ovh",
   workflow_filename: "ci.yml",
   confirm: true,
 };
@@ -12,7 +12,7 @@ const GITHUB_ARGS = {
 const existingConfig = (overrides: Record<string, unknown> = {}) => ({
   id: "11111111-2222-3333-4444-555555555555",
   type: "github",
-  claims: { repository: "mgcrea/mcp-ovh-api", workflow_ref: { file: "ci.yml" } },
+  claims: { repository: "mgcrea/mcp-ovh", workflow_ref: { file: "ci.yml" } },
   permissions: ["createPackage"],
   ...overrides,
 });
@@ -30,7 +30,7 @@ describe("npm_set_trusted_publisher", () => {
     const harness = await connect({ NPM_TOKEN: "t", NPM_ALLOW_WRITES: "1" }, fetchMock);
 
     const result = await harness.call("npm_set_trusted_publisher", {
-      package: "@mgcrea/mcp-ovh-api",
+      package: "@mgcrea/mcp-ovh",
       ...GITHUB_ARGS,
     });
 
@@ -38,14 +38,14 @@ describe("npm_set_trusted_publisher", () => {
     expect(result.status).toBe("created");
 
     // Scoped names are fully escaped on the /-/package/ routes.
-    expect(harness.urls()[0]).toContain("/-/package/%40mgcrea%2Fmcp-ovh-api/trust");
+    expect(harness.urls()[0]).toContain("/-/package/%40mgcrea%2Fmcp-ovh/trust");
 
     // The POST body is an ARRAY, not the object it looks like it should be.
     const body = harness.bodyAt(1) as unknown[];
     expect(Array.isArray(body)).toBe(true);
     expect(body[0]).toEqual({
       type: "github",
-      claims: { repository: "mgcrea/mcp-ovh-api", workflow_ref: { file: "ci.yml" } },
+      claims: { repository: "mgcrea/mcp-ovh", workflow_ref: { file: "ci.yml" } },
       permissions: ["createPackage"],
     });
   });
@@ -59,7 +59,7 @@ describe("npm_set_trusted_publisher", () => {
     const harness = await connect({ NPM_TOKEN: "t", NPM_ALLOW_WRITES: "1" }, fetchMock);
 
     const result = await harness.call("npm_set_trusted_publisher", {
-      package: "@mgcrea/mcp-ovh-api",
+      package: "@mgcrea/mcp-ovh",
       ...GITHUB_ARGS,
     });
 
@@ -78,7 +78,7 @@ describe("npm_set_trusted_publisher", () => {
     const harness = await connect({ NPM_TOKEN: "t", NPM_ALLOW_WRITES: "1" }, fetchMock);
 
     const result = await harness.call("npm_set_trusted_publisher", {
-      package: "@mgcrea/mcp-ovh-api",
+      package: "@mgcrea/mcp-ovh",
       ...GITHUB_ARGS,
     });
 
@@ -106,7 +106,7 @@ describe("npm_set_trusted_publisher", () => {
     const harness = await connect({ NPM_TOKEN: "t", NPM_ALLOW_WRITES: "1" }, fetchMock);
 
     const result = await harness.call("npm_set_trusted_publisher", {
-      package: "@mgcrea/mcp-ovh-api",
+      package: "@mgcrea/mcp-ovh",
       ...GITHUB_ARGS,
       replace_existing: true,
     });

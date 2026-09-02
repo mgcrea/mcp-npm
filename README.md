@@ -176,7 +176,7 @@ answers are a `bypass_2fa` token or 2FA not enabled on the account itself.
 See what one package has today:
 
 ```
-npm_get_trusted_publisher  package="@mgcrea/mcp-ovh-api"
+npm_get_trusted_publisher  package="@mgcrea/mcp-ovh"
 ```
 
 This is the call that triggers the browser confirmation, because npm requires an OTP even to
@@ -186,7 +186,7 @@ Now preview the whole batch — nothing is written:
 
 ```
 npm_set_trusted_publisher_batch
-  packages=["@mgcrea/mcp-npm", "@mgcrea/mcp-ovh-api", "@mgcrea/mcp-x-api"]
+  packages=["@mgcrea/mcp-npm", "@mgcrea/mcp-ovh", "@mgcrea/mcp-x"]
   provider="github"
   repository="mgcrea/mcp-npm"
   workflow_filename="ci.yml"
@@ -198,7 +198,7 @@ Then drop `dry_run`. Packages already configured correctly come back as `unchang
 nothing. Verify against npm's own CLI, which calls the same endpoint:
 
 ```bash
-npm trust list @mgcrea/mcp-ovh-api
+npm trust list @mgcrea/mcp-ovh
 ```
 
 With that in place, CI publishes with no token anywhere:

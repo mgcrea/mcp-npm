@@ -103,7 +103,7 @@ export const packageArg = z
     /^(?:@[a-z0-9-*~][a-z0-9-*._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/,
     "Not a valid npm package name. Names are lower-case; a scoped name looks like `@scope/name`.",
   )
-  .describe('Package name, e.g. "lodash" or "@mgcrea/mcp-ovh-api". Lower-case.');
+  .describe('Package name, e.g. "lodash" or "@mgcrea/mcp-ovh". Lower-case.');
 
 export const versionArg = z
   .string()

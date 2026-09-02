@@ -41,11 +41,11 @@ const publisherFields = {
     // browser confirmation to learn something a regex knows for free.
     .regex(
       /^[^/\s]+\/[^/\s]+$/,
-      'A GitHub repository claim is "owner/repo" — e.g. "mgcrea/mcp-ovh-api". Not a URL, and not just the repo name.',
+      'A GitHub repository claim is "owner/repo" — e.g. "mgcrea/mcp-ovh". Not a URL, and not just the repo name.',
     )
     .optional()
     .describe(
-      'GitHub only, required: "owner/repo", e.g. "mgcrea/mcp-ovh-api". Not a URL, and not just ' +
+      'GitHub only, required: "owner/repo", e.g. "mgcrea/mcp-ovh". Not a URL, and not just ' +
         "the repo name.",
     ),
   project_path: z
