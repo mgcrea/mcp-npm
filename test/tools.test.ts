@@ -18,6 +18,7 @@ const READ_TOOLS = [
   "npm_audit_dependencies",
   "npm_auth_clear_otp",
   "npm_auth_otp",
+  "npm_auth_reload",
   "npm_auth_status",
   "npm_get_dist_tags",
   "npm_get_downloads",
@@ -71,7 +72,9 @@ describe("tool registration", () => {
     const names = await (await connect({})).toolNames();
     // npm's advisory endpoint needs no authentication, so an unconfigured
     // server is still good for something real rather than being a setup guide.
-    expect(names).toEqual(["npm_audit_dependencies", "npm_auth_status"]);
+    // npm_auth_reload is here on purpose: an unconfigured server is exactly the
+    // one that needs to be told a token has appeared since it started.
+    expect(names).toEqual(["npm_audit_dependencies", "npm_auth_reload", "npm_auth_status"]);
   });
 
   it("answers npm_auth_status with setup instructions when unconfigured", async () => {

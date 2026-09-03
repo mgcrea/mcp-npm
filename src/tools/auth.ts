@@ -169,6 +169,47 @@ export const registerAuthTools = (
       }),
   );
 
+  server.registerTool(
+    "npm_auth_reload",
+    {
+      title: "npm: Reload Auth",
+      description:
+        "Re-read the npm token from ~/.npmrc, NPM_TOKEN and the config file, and report " +
+        "whether it changed. Use this after `npm login` in a terminal: this server captures " +
+        "the token when it starts, so a login that visibly worked leaves it sending the OLD " +
+        "credential and failing 401 on everything while `npm whoami` in your shell succeeds. " +
+        "Cheap and safe — it reads three files, sends nothing to npm, and never reports the " +
+        "token itself. It re-reads ONLY the token: the registry, the write gate and the OTP " +
+        "settings stay as they were at startup, so a reload can never quietly widen what this " +
+        "server may do. One limit worth knowing: if the server started with NO token at all, " +
+        "the credentialled tools were never registered, and a reload cannot add them — that " +
+        "case still needs a restart.",
+      inputSchema: z.object({}),
+      // Reads local files and mutates only this server's own cached credential.
+      annotations: { readOnlyHint: true },
+    },
+    async () =>
+      wrap(async () => {
+        const result = client.reloadToken();
+        return {
+          changed: result.changed,
+          had_token: result.hadToken,
+          has_token: result.hasToken,
+          token_source: result.source ?? null,
+          ...(result.previousSource !== result.source
+            ? { previous_token_source: result.previousSource ?? null }
+            : {}),
+          next_step: !result.hasToken
+            ? "Still no token in any layer. Run `npm login`, or set NPM_TOKEN, then call this again."
+            : result.changed
+              ? "The token changed. Call npm_auth_status to confirm npm accepts it."
+              : "The token is byte-for-byte what it was. If calls are still failing 401, the " +
+                "credential itself is the problem rather than a stale copy of it — run " +
+                "`npm login` and call this again.",
+        };
+      }),
+  );
+
   if (!ctx.hasCredentials) return;
 
   server.registerTool(

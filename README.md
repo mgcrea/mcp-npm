@@ -146,7 +146,7 @@ entirely, or `open: false` when the browser is on another machine.
 
 | Area               | Tools                                                                                                                                                                                                                                              |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Auth               | `npm_auth_status`, `npm_auth_otp`, `npm_auth_clear_otp`, `npm_whoami`                                                                                                                                                                              |
+| Auth               | `npm_auth_status`, `npm_auth_reload`, `npm_auth_otp`, `npm_auth_clear_otp`, `npm_whoami`                                                                                                                                                           |
 | Trusted publishing | `npm_get_trusted_publisher`, `npm_set_trusted_publisher` **W**, `npm_set_trusted_publisher_batch` **W**, `npm_delete_trusted_publisher` **W**⚠                                                                                                     |
 | Packages           | `npm_get_package`, `npm_get_package_version`, `npm_list_versions`, `npm_search_packages`                                                                                                                                                           |
 | Dist-tags          | `npm_get_dist_tags`, `npm_add_dist_tag` **W**, `npm_remove_dist_tag` **W**⚠                                                                                                                                                                        |
@@ -242,6 +242,16 @@ permissions:
 **A tool I expected is missing.** Call `npm_auth_status`. An absent tool almost always means
 missing configuration or `NPM_ALLOW_WRITES` being off — write tools are not registered at all
 when it is unset, by design.
+
+**Everything 401s, but `npm whoami` works in my terminal.** The token this server holds is a
+stale copy. It reads `~/.npmrc` once at startup, so an `npm login` that visibly succeeded does
+not reach a server that was already running. Call **`npm_auth_reload`** — it re-reads the token
+and reports whether it changed. A 401 also triggers the same re-read automatically and retries
+once, so this is mostly self-healing now; the tool is for confirming it, and for the case where
+you would rather not spend a failed call finding out.
+
+One thing a reload cannot fix: if the server started with **no** token at all, the credentialled
+tools were never registered, and only a restart adds them.
 
 **`Connection closed` in the client.** Run the binary by hand with the same environment; the
 error the client swallowed is on stderr.

@@ -1,9 +1,9 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { vi } from "vitest";
 
-import { staticTokenProvider } from "#/client/auth";
+import { staticTokenProvider, type TokenProvider } from "#/client/auth";
 import type { OtpProvider, OtpRequest } from "#/client/otp";
-import { loadConfig, type Config } from "#/config";
+import { loadConfig, type Config, type ResolvedToken } from "#/config";
 import { createServer } from "#/server";
 
 /**
@@ -107,7 +107,7 @@ export type Harness = Awaited<ReturnType<typeof connect>>;
 export const connect = async (
   env: Record<string, string> = { NPM_TOKEN: "test-token" },
   fetchImpl?: ReturnType<typeof vi.fn>,
-  opts: { otpProvider?: OtpProvider } = {},
+  opts: { otpProvider?: OtpProvider; readToken?: () => ResolvedToken } = {},
 ) => {
   const config: Config = loadConfig(env, ABSENT_CONFIG, ABSENT_NPMRC);
   const fetchMock = fetchImpl ?? vi.fn(async () => jsonResponse({}));
@@ -116,18 +116,23 @@ export const connect = async (
   // to emit.
   let tokenInvalidations = 0;
   const base = staticTokenProvider(config.token ?? "test-token");
-  const tokenProvider = {
+  const tokenProvider: TokenProvider = {
     getToken: base.getToken,
     invalidate: () => {
       tokenInvalidations += 1;
-      base.invalidate();
+      return base.invalidate();
     },
+    reload: base.reload,
+    source: base.source,
   };
 
   const { server, otpProvider } = createServer({
     config,
     fetch: fetchMock as unknown as typeof fetch,
-    tokenProvider,
+    // A `readToken` means the test wants the REAL reloadable provider, so the
+    // counting stub above must step aside rather than freeze the token it is
+    // there to watch move.
+    ...(opts.readToken ? { readToken: opts.readToken } : { tokenProvider }),
     ...(opts.otpProvider ? { otpProvider: opts.otpProvider } : {}),
   });
 

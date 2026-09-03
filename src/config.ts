@@ -189,6 +189,64 @@ const readConfigFile = (path: string): FileConfig => {
   return result.data;
 };
 
+/** A token and the layer it came from. Both, always — see `tokenFrom`. */
+export type ResolvedToken = {
+  token: string | undefined;
+  tokenSource: TokenSource | undefined;
+};
+
+/**
+ * Resolve the token from the three layers, and remember which one supplied it.
+ *
+ * The source is worth as much as the token when something goes wrong: "the
+ * token was rejected" is unactionable until you know which of three files to go
+ * and fix.
+ */
+const tokenFrom = (
+  registry: string,
+  file: FileConfig,
+  env: NodeJS.ProcessEnv,
+  npmrcPath: string,
+): ResolvedToken => {
+  const envToken = trimmed(env.NPM_TOKEN);
+  const fileToken = file.token;
+  // Only touch ~/.npmrc when the two explicit layers have nothing. Reading a
+  // file the user never pointed us at is a last resort, not a default.
+  const npmrcToken =
+    envToken === undefined && fileToken === undefined
+      ? readNpmrcToken(registry, npmrcPath)
+      : undefined;
+  return {
+    token: envToken ?? fileToken ?? npmrcToken,
+    tokenSource: envToken ? "environment" : fileToken ? "file" : npmrcToken ? "npmrc" : undefined,
+  };
+};
+
+/**
+ * Re-run just the token half of `loadConfig`, reading every layer again from
+ * disk.
+ *
+ * This exists because the token is the one field that changes underneath a
+ * running server: `npm login` rewrites `~/.npmrc`, and until this server reads
+ * it again it keeps sending the credential it captured at startup. Every call
+ * then fails 401 while `npm whoami` in a terminal succeeds, which points the
+ * blame at npm rather than here.
+ *
+ * Deliberately narrower than a full `loadConfig`. Re-reading everything would
+ * let a stray edit to the config file change the write gate or the registry
+ * under a session that never asked for it; the token is the only field with a
+ * reason to move.
+ */
+export const resolveToken = (
+  env: NodeJS.ProcessEnv = process.env,
+  configPath: string = resolveConfigPath(env),
+  npmrcPath: string = resolveNpmrcPath(env),
+): ResolvedToken => {
+  const file = readConfigFile(configPath);
+  const registry = trimmed(env.NPM_REGISTRY) ?? file.registry ?? DEFAULT_REGISTRY;
+  return tokenFrom(registry, file, env, npmrcPath);
+};
+
 /**
  * Environment first, config file second, `~/.npmrc` last — **per field**, not
  * whole-source. Docker and CI inject the environment and must keep working
@@ -205,26 +263,7 @@ export const loadConfig = (
 ): Config => {
   const file = readConfigFile(configPath);
   const registry = trimmed(env.NPM_REGISTRY) ?? file.registry ?? DEFAULT_REGISTRY;
-
-  // Resolve the token and remember which layer supplied it. The source is worth
-  // as much as the token when something goes wrong: "the token was rejected" is
-  // unactionable until you know which of three files to go and fix.
-  const envToken = trimmed(env.NPM_TOKEN);
-  const fileToken = file.token;
-  // Only touch ~/.npmrc when the two explicit layers have nothing. Reading a
-  // file the user never pointed us at is a last resort, not a default.
-  const npmrcToken =
-    envToken === undefined && fileToken === undefined
-      ? readNpmrcToken(registry, npmrcPath)
-      : undefined;
-  const token = envToken ?? fileToken ?? npmrcToken;
-  const tokenSource: TokenSource | undefined = envToken
-    ? "environment"
-    : fileToken
-      ? "file"
-      : npmrcToken
-        ? "npmrc"
-        : undefined;
+  const { token, tokenSource } = tokenFrom(registry, file, env, npmrcPath);
 
   return ConfigSchema.parse({
     registry,
@@ -258,6 +297,9 @@ export const setupInstructions = (config: Config): string[] => {
       "npm_auth_status and npm_audit_dependencies.",
     "The simplest fix is `npm login` — this server reads the resulting " +
       `\`//${new URL(config.registry).host}/:_authToken=\` line from ~/.npmrc automatically.`,
+    "If you run `npm login` while this server is already running, call npm_auth_reload — the " +
+      "token is read at startup, so a login that worked in your terminal does not reach a " +
+      "process that started before it.",
     "Otherwise set NPM_TOKEN. Create a token at https://www.npmjs.com/settings/~/tokens.",
     // The trap that costs the most: the token type that looks most correct for
     // an automated server is the one npm refuses for trusted publishing.

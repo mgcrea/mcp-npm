@@ -1,4 +1,4 @@
-import type { Logger, TokenProvider } from "#/client/auth";
+import type { Logger, TokenProvider, TokenReload } from "#/client/auth";
 import { errorDetail, NpmOtpError, NpmRegistryError } from "#/client/errors";
 import { isOtpChallenge, parseWebChallenge, tokenIdentity, type OtpProvider } from "#/client/otp";
 
@@ -96,7 +96,7 @@ export class NpmRegistryClient {
   private readonly otps: OtpProvider;
   private readonly maxRetries: number;
   private readonly userAgent: string;
-  private readonly tokenSource: string;
+  private readonly initialTokenSource: string;
   private readonly fetchImpl: typeof fetch;
   private readonly logger: Logger | undefined;
 
@@ -107,9 +107,30 @@ export class NpmRegistryClient {
     this.otps = opts.otpProvider;
     this.maxRetries = opts.maxRetries;
     this.userAgent = opts.userAgent;
-    this.tokenSource = opts.tokenSource ?? "an unknown source";
+    this.initialTokenSource = opts.tokenSource ?? "an unknown source";
     this.fetchImpl = opts.fetch ?? fetch;
     this.logger = opts.logger;
+  }
+
+  /**
+   * Re-read the token from whatever supplies it.
+   *
+   * Exposed on the client because the tools reach the provider through it, and
+   * because a reload is only ever interesting alongside the requests it fixes.
+   */
+  reloadToken(): TokenReload {
+    return this.tokens.reload();
+  }
+
+  /**
+   * Which layer supplies the token right now.
+   *
+   * Read from the provider rather than remembered from construction: a reload
+   * can move the token between layers, and naming the layer it used to come
+   * from sends you to edit a file that is no longer being read.
+   */
+  private get tokenSource(): string {
+    return this.tokens.source() ?? this.initialTokenSource;
   }
 
   /** The OTP cache key for the token currently configured. */
@@ -231,10 +252,17 @@ export class NpmRegistryClient {
       }
 
       if (res.status === 401 && !opts.anonymous && attempt < this.maxRetries) {
-        this.logger?.warn?.("HTTP 401 (not an OTP challenge) — reminting token");
-        this.tokens.invalidate();
-        attempt += 1;
-        continue;
+        // Re-read the token from its source before deciding. `npm login` writes
+        // a fresh one to ~/.npmrc, so a 401 is genuinely recoverable — but only
+        // when the bytes actually moved. Retrying with the same token npm just
+        // refused spends the whole budget to arrive at the same 401, several
+        // seconds later and with the cause no clearer.
+        if (this.tokens.invalidate()) {
+          this.logger?.warn?.("HTTP 401 — the token changed on disk; retrying with the new one");
+          attempt += 1;
+          continue;
+        }
+        this.logger?.warn?.("HTTP 401 — the token is unchanged at its source; not retrying");
       }
       // ---- end 401 fork ---------------------------------------------------
 

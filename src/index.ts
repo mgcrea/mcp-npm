@@ -15,15 +15,19 @@ export {
   setupInstructions,
   type Config,
   type FileConfig,
+  resolveToken,
   type OtpMode,
+  type ResolvedToken,
   type TokenSource,
 } from "#/config";
 export { authTokenKey, parseNpmrcToken, readNpmrcToken, resolveNpmrcPath } from "#/client/npmrc";
 export {
   configTokenProvider,
+  reloadableTokenProvider,
   staticTokenProvider,
   type Logger,
   type TokenProvider,
+  type TokenReload,
 } from "#/client/auth";
 export {
   createWebOtpProvider,

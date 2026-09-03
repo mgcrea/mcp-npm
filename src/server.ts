@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/server";
 
 import { BUILD_INFO } from "#/build-info";
-import { configTokenProvider, type Logger, type TokenProvider } from "#/client/auth";
+import { reloadableTokenProvider, type Logger, type TokenProvider } from "#/client/auth";
 import {
   createWebOtpProvider,
   noOtpProvider,
@@ -9,7 +9,7 @@ import {
   type OtpProvider,
 } from "#/client/otp";
 import { NpmRegistryClient } from "#/client/registry";
-import { isConfigured, type Config } from "#/config";
+import { isConfigured, resolveToken, type Config, type ResolvedToken } from "#/config";
 import { registerTools } from "#/tools/index";
 
 export const SERVER_NAME = BUILD_INFO.name;
@@ -22,6 +22,12 @@ export type CreateServerOptions = {
   logger?: Logger;
   /** Override the token provider (tests). */
   tokenProvider?: TokenProvider;
+  /**
+   * Where a token reload reads from. Defaults to the same three layers
+   * `loadConfig` merges. Injected so tests can move a token without a
+   * filesystem, and so nothing below `config.ts` reaches for `process.env`.
+   */
+  readToken?: () => ResolvedToken;
   /** Override the one-time-password provider (tests). */
   otpProvider?: OtpProvider;
 };
@@ -57,7 +63,11 @@ export const createServer = (opts: CreateServerOptions): CreatedServer => {
   const { config } = opts;
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
-  const tokenProvider = opts.tokenProvider ?? configTokenProvider(config.token);
+  // Reloadable, not fixed: the token is the one field that changes underneath a
+  // running server, and a server that cannot re-read it answers 401 forever
+  // after an `npm login` that visibly worked.
+  const tokenProvider =
+    opts.tokenProvider ?? reloadableTokenProvider(opts.readToken ?? (() => resolveToken()));
   const otpProvider = opts.otpProvider ?? buildOtpProvider(config, opts);
 
   const client = new NpmRegistryClient({
