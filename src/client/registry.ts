@@ -439,6 +439,26 @@ export class NpmRegistryClient {
     }
 
     if (res.status === 404) {
+      // A 404 on a WRITE is not "no such path". npm answers the create route
+      // with 404 rather than 403 when the token may not create the package —
+      // it will not confirm to a caller who could not claim a name that the
+      // name is there to be claimed. Read as "nothing at that path", it sends
+      // you hunting for a typo in a path that was correct, which is what makes
+      // a first publish so much harder than it should be.
+      if (method !== "GET" && method !== "HEAD") {
+        return new NpmRegistryError(base, {
+          status: res.status,
+          errors: parsed,
+          remedy:
+            "npm refused this write. On a FIRST publish this nearly always means the token may " +
+            "not CREATE a package here, not that the path is wrong: a granular access token " +
+            "limited to selected packages cannot claim a name that does not exist yet, and npm " +
+            "reports that as 404 rather than 403. Either give the token read-and-write on the " +
+            "whole scope, or run `npm login` for a session token and call npm_auth_reload — " +
+            "npm_auth_status shows which kind you have. Note that OIDC trusted publishing " +
+            "cannot create a name either, so the first version always needs a token.",
+        });
+      }
       return new NpmRegistryError(base, {
         status: res.status,
         errors: parsed,

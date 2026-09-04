@@ -365,3 +365,42 @@ describe("packDirectory", () => {
     expect(Buffer.from(packed.data, "base64").toString()).toBe("scoped-bytes");
   });
 });
+
+describe("a first publish, where the package name does not exist yet", () => {
+  /**
+   * npm answers the create route with 404 rather than 403 when the token may
+   * not claim the name — it will not confirm to a caller who could not take a
+   * name that the name is free. The generic read remedy sent us hunting for a
+   * typo in a path that was correct, which is exactly the wrong direction.
+   */
+  it("blames the token, not the path, when npm 404s a publish PUT", async () => {
+    const fetchMock = vi.fn(async (url: unknown, init?: unknown) => {
+      const method = ((init ?? {}) as RequestInit).method ?? "GET";
+      // The pre-flight packument read: a 404 here is the normal, correct
+      // answer for a name nobody has published yet.
+      if (method === "GET") return jsonResponse({ error: "Not found" }, { status: 404 });
+      return jsonResponse({ error: "Not found" }, { status: 404 });
+    });
+    const harness = await connect({ NPM_TOKEN: "test-token", NPM_ALLOW_WRITES: "1" }, fetchMock);
+    const result = await harness.call("npm_publish", {
+      directory: process.cwd(),
+      confirm: true,
+      access: "public",
+    });
+
+    expect(result.isToolError).toBe(true);
+    expect(String(result.remedy)).toContain("may not CREATE a package here");
+    expect(String(result.remedy)).toContain("npm_auth_reload");
+    // And it must not send the reader off to check path escaping.
+    expect(String(result.remedy)).not.toContain("fully escaped");
+  });
+
+  it("keeps the path-shaped remedy for a 404 on a read", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "Not found" }, { status: 404 }));
+    const harness = await connect({ NPM_TOKEN: "test-token" }, fetchMock);
+    const result = await harness.call("npm_get_package", { package: "@mgcrea/nope" });
+
+    expect(result.isToolError).toBe(true);
+    expect(String(result.remedy)).toContain("fully escaped");
+  });
+});

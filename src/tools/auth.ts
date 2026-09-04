@@ -318,7 +318,22 @@ export const registerAuthTools = (
                     "challenge, so this is not an OTP problem. Retry with a package whose trust " +
                     "configuration this token can read, or pass `code` from an authenticator app.",
               }
-            : {}),
+            : // The probe SUCCEEDED and npm never asked for a second factor, so
+              // there is nothing to cache and `ok` is false. That reads as a
+              // failed OTP flow and is the opposite of the truth — it is the
+              // good case, and saying so is the difference between calling the
+              // trusted-publisher tools next and hunting for an OTP nobody
+              // wants. Whether npm challenges at all depends on the token kind
+              // and the account's 2FA mode, so it cannot be predicted here.
+              status.cached
+              ? {}
+              : {
+                  note:
+                    "npm did NOT ask for a one-time password on this endpoint with this token, " +
+                    "so none was cached and none is needed — this is the good case, not a " +
+                    "failure. Call the trusted-publisher tools directly. If one of them does " +
+                    "get challenged, it runs this same flow on its own.",
+                }),
         };
       }),
   );
