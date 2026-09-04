@@ -26,6 +26,16 @@ export type OtpRequest = {
   subject?: string | undefined;
   /** Present only when reacting to a 401. Absent means "give me what you have". */
   challenge?: WebOtpChallenge | undefined;
+  /**
+   * True when this call is reacting to a 401, whether or not the challenge body
+   * could be parsed.
+   *
+   * `challenge` alone cannot carry that: npm only returns a parseable
+   * {authUrl, doneUrl} when the request asked for the web flow, so a provider
+   * that mints locally would see `challenge: undefined` on a real challenge and
+   * conclude nothing was being asked of it.
+   */
+  challenged?: boolean;
   /** The identity the code will be paired with, so it is never sent under another token. */
   identity: string;
   /**
@@ -407,5 +417,158 @@ export const noOtpProvider = (): OtpProvider => {
       usesRemaining: manual.has(identity) ? 1 : 0,
     }),
     clear: () => manual.clear(),
+  };
+};
+
+export type TotpOtpProviderOptions = {
+  /** Which seed to read, e.g. "npm". */
+  label: string;
+  /** NPM_TOTP_SECRET: an otpauth:// URI or a bare base32 key. Beats the keychain. */
+  secret?: string | undefined;
+  keychainService: string;
+  logger?: Logger | undefined;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  ttlMs?: number;
+  maxUses?: number;
+  /** Injected for tests, so the suite never reads a real keychain. */
+  loadSeed?: () => Promise<{ secret: string; digits: number; period: number; algorithm: string }>;
+};
+
+/**
+ * Mint the second factor locally from a stored seed, through
+ * `@mgcrea/mcp-totp/core`. This is the only mode that runs unattended.
+ *
+ * Three behaviours here are not obvious, and each exists for a reason:
+ *
+ *  1. **`getOtp` still returns undefined when there is no challenge and nothing
+ *     cached.** A TOTP *can* be produced at any time, but returning one eagerly
+ *     would put an `npm-otp` header on every request — including the ones npm
+ *     never asks a factor for. Minting on the challenge keeps the un-factored
+ *     first attempt that produces the challenge in the first place.
+ *  2. **A code is never replayed.** TOTP verification is single-use: a code npm
+ *     has already consumed is rejected, and within one 30-second window the
+ *     naive implementation hands back the identical string forever. When the
+ *     current window's code is spent, this waits for the next window instead —
+ *     bounded by one period, and rare in practice because a successful mint
+ *     lands in the shared cache below.
+ *  3. **The cache is the same one the web flow fills**, keyed on token identity,
+ *     so a batch across N packages still spends one code rather than N.
+ */
+export const createTotpOtpProvider = (opts: TotpOtpProviderOptions): OtpProvider => {
+  const now = opts.now ?? Date.now;
+  const sleep = opts.sleep ?? defaultSleep;
+  const ttlMs = opts.ttlMs ?? 300_000;
+  const maxUses = opts.maxUses ?? 80;
+
+  const cache = new Map<string, OtpEntry>();
+  const spent = new Set<string>();
+
+  const live = (identity: string): OtpEntry | undefined => {
+    const entry = cache.get(identity);
+    if (!entry) return undefined;
+    if (entry.expiresAt <= now() || entry.usesRemaining <= 0) {
+      cache.delete(identity);
+      return undefined;
+    }
+    return entry;
+  };
+
+  const loadSeed =
+    opts.loadSeed ??
+    (async () => {
+      // Imported lazily so a server in web mode never pays for the module, and
+      // so a machine with no keychain fails at the moment a code is wanted
+      // rather than at startup — where the error would be swallowed as a bare
+      // "Connection closed".
+      const core = await import("@mgcrea/mcp-totp/core");
+      const store = core.createSeedStore({
+        keychain: core.createKeychainStore(opts.keychainService),
+        env: opts.secret ? { [core.envVarFor(opts.label)]: opts.secret } : {},
+      });
+      return store.get(opts.label);
+    });
+
+  const mint = async (): Promise<string> => {
+    const core = await import("@mgcrea/mcp-totp/core");
+    const seed = await loadSeed();
+    const secret = core.base32Decode(seed.secret);
+
+    const codeAt = (atMs: number): string =>
+      core.totp({
+        secret,
+        digits: seed.digits,
+        period: seed.period,
+        algorithm: seed.algorithm as "SHA1" | "SHA256" | "SHA512",
+        atMs,
+      });
+
+    let code = codeAt(now());
+    if (spent.has(code)) {
+      // The only correct move is to wait out the window. Resending a code npm
+      // already consumed spends the request's single OTP attempt to arrive at
+      // the same rejection.
+      const waitMs = core.secondsRemaining(now(), seed.period) * 1000;
+      opts.logger?.warn?.(
+        `The current TOTP code was already used; waiting ${Math.ceil(waitMs / 1000)}s for the next one.`,
+      );
+      await sleep(waitMs);
+      code = codeAt(now());
+      if (spent.has(code)) {
+        throw new Error(
+          "The TOTP seed produced an already-used code twice in a row. Check that the " +
+            "system clock is correct and that the seed matches the npm account.",
+        );
+      }
+    }
+    return code;
+  };
+
+  return {
+    getOtp: async (req) => {
+      const cached = live(req.identity);
+      if (cached) {
+        cached.usesRemaining -= 1;
+        return cached.code;
+      }
+      // No challenge means "give me what you have" — eagerly attaching a freshly
+      // minted code to every request is exactly what rule 1 above avoids.
+      //
+      // Note this does NOT also require `req.wait`, unlike the web provider.
+      // That gate exists to avoid opening a browser and polling for minutes with
+      // nobody watching; minting locally costs a HMAC, so the reason for it is
+      // absent and honouring it would block precisely the unattended calls this
+      // mode exists to unblock.
+      if (!req.challenged) return undefined;
+
+      const code = await mint();
+      cache.set(req.identity, { code, expiresAt: now() + ttlMs, usesRemaining: maxUses - 1 });
+      return code;
+    },
+
+    invalidate: (code) => {
+      spent.add(code);
+      for (const [identity, entry] of cache) if (entry.code === code) cache.delete(identity);
+    },
+
+    offer: (code, identity) => {
+      spent.delete(code);
+      cache.set(identity, { code, expiresAt: now() + ttlMs, usesRemaining: maxUses });
+    },
+
+    peek: (identity) => {
+      const entry = live(identity);
+      return {
+        mode: "totp",
+        cached: Boolean(entry),
+        expiresInMs: entry ? Math.max(0, entry.expiresAt - now()) : 0,
+        usesRemaining: entry?.usesRemaining ?? 0,
+      };
+    },
+
+    clear: () => {
+      cache.clear();
+      spent.clear();
+    },
   };
 };

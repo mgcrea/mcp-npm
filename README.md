@@ -20,13 +20,18 @@ turn them on.
 - **Never exits on missing credentials.** An unconfigured server still answers, and
   `npm_auth_status` tells you exactly what to set.
 - **Responses shaped for a context window.** A raw packument is megabytes; these are a screen.
-- Native `fetch`, no runtime dependencies beyond the MCP SDK and Zod.
+- Native `fetch`, no runtime dependencies beyond the MCP SDK, Zod and `@mgcrea/mcp-totp`.
 
 ## Security
 
-**Supply chain.** Two runtime dependencies: `@modelcontextprotocol/server` and `zod`. No HTTP
-client, no logging framework. Every transitive dependency would be attack surface on a process
-holding a live npm token.
+**Supply chain.** Three runtime dependencies: `@modelcontextprotocol/server`, `zod` and
+`@mgcrea/mcp-totp`. No HTTP client, no logging framework. Every transitive dependency would be
+attack surface on a process holding a live npm token.
+
+The third is ours, and it is the fleet's usual justification for one: `@mgcrea/mcp-totp/core` is
+the dependency-free half of our own TOTP server — RFC 6238, `otpauth://` parsing and the macOS
+keychain store — and re-deriving it here would fork it on day one. It is imported **lazily**, so
+a server in the default `web` mode never loads it, and it pulls in nothing of its own.
 
 **Your credentials.** The token is read from `NPM_TOKEN`, a config file, or the entry in
 `~/.npmrc` **matching the configured registry** — a token for npmjs.org is never sent to a
@@ -61,7 +66,10 @@ npm whoami       # if this answers, you are configured
 | `NPM_REGISTRY`          | no       | Defaults to `https://registry.npmjs.org`. The `.npmrc` token is looked up for this host.                     |
 | `NPM_DOWNLOADS_URL`     | no       | Defaults to `https://api.npmjs.org`. A different host, never authenticated.                                  |
 | `NPM_ALLOW_WRITES`      | no       | `1` to register the write tools. Off by default.                                                             |
-| `NPM_OTP_MODE`          | no       | `web` (default), `static`, or `none`. See [Two-factor](#two-factor-and-why-this-cannot-be-fully-unattended). |
+| `NPM_OTP_MODE`          | no       | `web` (default), `totp`, `static`, or `none`. See [Two-factor](#two-factor).                                 |
+| `NPM_TOTP_LABEL`        | no       | `totp` mode: which seed to read. Defaults to `npm`.                                                          |
+| `NPM_TOTP_SECRET`       | no       | `totp` mode: an `otpauth://` URI or base32 key, instead of the keychain.                                     |
+| `NPM_OTP_AUTH_TYPE`     | no       | Overrides the `npm-auth-type` header. Escape hatch; leave unset.                                             |
 | `NPM_OTP`               | no       | A code. Almost always wrong — see the note in `.env.example`.                                                |
 | `NPM_OTP_TTL_SECONDS`   | no       | How long a confirmed code is reused. Defaults to `300`, npm's own window.                                    |
 | `NPM_OTP_MAX_USES`      | no       | Calls one code covers. Defaults to `80`, npm's own guidance.                                                 |
@@ -118,19 +126,60 @@ node dist/cli.js
 npx @modelcontextprotocol/inspector node dist/cli.js
 ```
 
-## Two-factor, and why this cannot be fully unattended
+## Two-factor
 
 npm requires an `npm-otp` header on **all three** trusted-publisher endpoints — including the
 read — and a one-time password lasts about five minutes. A code cannot be configured once at
-startup and reused: it is dead before anything runs. **Fully unattended trusted-publisher
-configuration is not possible**, and `npm_auth_status` reports that rather than offering a
-setting that looks like it should work.
+startup and reused: it is dead before anything runs.
 
-What _is_ possible is spending one authorization on many packages. npm's confirmation page has a
+How far that gets you depends on `NPM_OTP_MODE`:
+
+| Mode            | Where the code comes from                    | Unattended?                                            |
+| --------------- | -------------------------------------------- | ------------------------------------------------------ |
+| `web` (default) | npm's browser confirmation page              | No — one human click per five-minute window            |
+| `totp`          | Minted locally from a stored seed            | **Yes**                                                |
+| `static`        | `NPM_OTP`, typed in                          | No, and usually already expired by the time it is used |
+| `none`          | Nothing; `npm_auth_otp` can still supply one | No                                                     |
+
+`npm_auth_status` reports which flow will actually run, and says plainly what each one can and
+cannot do rather than offering a setting that looks like it should work.
+
+### `totp` mode
+
+Set `NPM_OTP_MODE=totp` and the second factor is computed on the spot, with no browser and no
+click, so batches and scripted publishes run start to finish on their own:
+
+```bash
+NPM_OTP_MODE=totp            # seed read via @mgcrea/mcp-totp
+NPM_TOTP_LABEL=npm           # which seed; defaults to "npm"
+NPM_TOTP_SECRET=...          # optional: otpauth:// URI or base32 key, for Docker/CI
+```
+
+With no `NPM_TOTP_SECRET`, the seed comes from the macOS login keychain — see
+[`@mgcrea/mcp-totp`](https://github.com/mgcrea/mcp-totp) for how to get one in there, including
+sharing it with Passwords.app so your phone keeps working.
+
+**The trade is real and worth stating.** npm's second factor then lives on the same machine as
+the npm token, so anything that can read that keychain item can publish as you. Where it applies,
+**trusted publishing over OIDC is strictly better — it needs no second factor at all.** Reach for
+`totp` for local publishes and account management, not as a substitute for OIDC in CI.
+
+One implementation detail that matters if you are debugging it: a TOTP code is single-use, so the
+provider never replays one npm has already consumed — if the current 30-second window is burnt it
+waits for the next.
+
+`npm-auth-type` stays `web` in this mode too. That was checked against the live registry rather
+than assumed: a TOTP typed straight from an authenticator was accepted on both the publish and
+trusted-publisher endpoints with `web` set, so npm validates `npm-otp` without consulting it —
+and `web` is what makes npm attach an authorization URL to a challenge, which is the only way a
+human recovers from a missing or wrong code. `NPM_OTP_AUTH_TYPE` overrides it if npm ever changes
+how it negotiates.
+
+In `web` mode, what _is_ possible is spending one authorization on many packages. npm's confirmation page has a
 same-IP cooldown; this server caches the confirmed code for that window (in memory, never on
 disk) so `npm_set_trusted_publisher_batch` prompts once for up to 25 packages.
 
-The flow, when npm asks:
+The `web` flow, when npm asks:
 
 1. A trust call goes out without a code and npm answers `401` with an authorization URL.
 2. **Every trust tool except `npm_auth_otp` fails right there**, with that URL in `authUrl` and

@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { BUILD_INFO } from "#/build-info";
 import { reloadableTokenProvider, type Logger, type TokenProvider } from "#/client/auth";
 import {
+  createTotpOtpProvider,
   createWebOtpProvider,
   noOtpProvider,
   staticOtpProvider,
@@ -48,6 +49,16 @@ export type CreatedServer = {
 const buildOtpProvider = (config: Config, opts: CreateServerOptions): OtpProvider => {
   if (config.otp) return staticOtpProvider(config.otp);
   if (config.otpMode === "none") return noOtpProvider();
+  if (config.otpMode === "totp") {
+    return createTotpOtpProvider({
+      label: config.totpLabel,
+      keychainService: config.totpKeychainService,
+      ttlMs: config.otpTtlSeconds * 1000,
+      maxUses: config.otpMaxUses,
+      ...(config.totpSecret ? { secret: config.totpSecret } : {}),
+      ...(opts.logger ? { logger: opts.logger } : {}),
+    });
+  }
   return createWebOtpProvider({
     registry: config.registry,
     ttlMs: config.otpTtlSeconds * 1000,
@@ -77,6 +88,7 @@ export const createServer = (opts: CreateServerOptions): CreatedServer => {
     otpProvider,
     maxRetries: config.maxRetries,
     userAgent: USER_AGENT,
+    ...(config.otpAuthType ? { otpAuthType: config.otpAuthType } : {}),
     ...(config.tokenSource ? { tokenSource: config.tokenSource } : {}),
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
     ...(opts.logger ? { logger: opts.logger } : {}),

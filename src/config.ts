@@ -14,7 +14,7 @@ export const DEFAULT_REGISTRY = "https://registry.npmjs.org";
  */
 export const DEFAULT_DOWNLOADS_BASE_URL = "https://api.npmjs.org";
 
-export const OTP_MODES = ["web", "static", "none"] as const;
+export const OTP_MODES = ["web", "static", "totp", "none"] as const;
 export type OtpMode = (typeof OTP_MODES)[number];
 
 /** Where a token came from. Reported by npm_auth_status; never the token itself. */
@@ -30,11 +30,33 @@ const ConfigSchema = z
     maxRetries: z.number().int().nonnegative().max(10).default(3),
     /**
      * How a one-time password is obtained when npm demands one.
-     * `web` runs npm's browser flow; `static` uses NPM_OTP; `none` refuses,
-     * which is the right setting for a headless run that must never block.
+     * `web` runs npm's browser flow; `static` uses NPM_OTP; `totp` mints one
+     * locally from a stored seed; `none` refuses, which is the right setting
+     * for a headless run that must never block.
      */
     otpMode: z.enum(OTP_MODES).default("web"),
     otp: z.string().min(1).optional(),
+    /**
+     * `totp` mode. The seed is read through @mgcrea/mcp-totp/core — from
+     * NPM_TOTP_SECRET when set, otherwise from the macOS login keychain.
+     *
+     * This is the only mode that runs unattended, and the trade is explicit:
+     * npm's second factor then lives on the same machine as the npm token, so
+     * anything that can read the keychain can publish. Prefer trusted
+     * publishing over OIDC where it applies — it needs no second factor at all.
+     */
+    totpLabel: z.string().min(1).default("npm"),
+    totpSecret: z.string().min(1).optional(),
+    totpKeychainService: z.string().min(1).default("com.mgcrea.mcp-totp"),
+    /**
+     * The `npm-auth-type` header sent alongside `npm-command`. Defaults to
+     * whatever the OTP provider asks for — `web` for the browser flow, `legacy`
+     * for a locally minted code, matching what npm's own CLI sends in each case.
+     * Overridable because it is the one header most likely to need a live fix
+     * if npm changes how it negotiates: a wrong value turns a correct code into
+     * an unexplained rejection.
+     */
+    otpAuthType: z.enum(["web", "legacy"]).optional(),
     /**
      * How long a minted OTP is reused. npm's own cooldown is about five
      * minutes, and this is a client-side guess at that server-side window —
@@ -93,6 +115,10 @@ const FileConfigSchema = z
     maxRetries: z.number().int().nonnegative().max(10).optional(),
     otpMode: z.enum(OTP_MODES).optional(),
     otp: z.string().min(1).optional(),
+    totpLabel: z.string().min(1).optional(),
+    totpSecret: z.string().min(1).optional(),
+    totpKeychainService: z.string().min(1).optional(),
+    otpAuthType: z.enum(["web", "legacy"]).optional(),
     otpTtlSeconds: z.number().int().min(0).max(900).optional(),
     otpMaxUses: z.number().int().min(1).max(500).optional(),
     autoOpenBrowser: z.boolean().optional(),
@@ -274,6 +300,10 @@ export const loadConfig = (
     maxRetries: parseIntOpt(env.NPM_MAX_RETRIES) ?? file.maxRetries,
     otpMode: trimmed(env.NPM_OTP_MODE) ?? file.otpMode,
     otp: trimmed(env.NPM_OTP) ?? file.otp,
+    totpLabel: trimmed(env.NPM_TOTP_LABEL) ?? file.totpLabel,
+    totpSecret: trimmed(env.NPM_TOTP_SECRET) ?? file.totpSecret,
+    totpKeychainService: trimmed(env.NPM_TOTP_KEYCHAIN_SERVICE) ?? file.totpKeychainService,
+    otpAuthType: trimmed(env.NPM_OTP_AUTH_TYPE) ?? file.otpAuthType,
     otpTtlSeconds: parseIntOpt(env.NPM_OTP_TTL_SECONDS) ?? file.otpTtlSeconds,
     otpMaxUses: parseIntOpt(env.NPM_OTP_MAX_USES) ?? file.otpMaxUses,
     autoOpenBrowser: parseBool(env.NPM_AUTO_OPEN_BROWSER) ?? file.autoOpenBrowser,

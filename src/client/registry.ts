@@ -92,6 +92,11 @@ export type RegistryClientOptions = {
   userAgent: string;
   /** Which config layer supplied the token. Quoted in auth error remedies. */
   tokenSource?: string | undefined;
+  /**
+   * Overrides the `npm-auth-type` header. Escape hatch only — see the note in
+   * the constructor for why `web` is the right default even for a typed code.
+   */
+  otpAuthType?: "web" | "legacy" | undefined;
   fetch?: typeof fetch;
   logger?: Logger | undefined;
 };
@@ -104,6 +109,7 @@ export class NpmRegistryClient {
   private readonly maxRetries: number;
   private readonly userAgent: string;
   private readonly initialTokenSource: string;
+  private readonly otpAuthType: "web" | "legacy";
   private readonly fetchImpl: typeof fetch;
   private readonly logger: Logger | undefined;
 
@@ -115,6 +121,15 @@ export class NpmRegistryClient {
     this.maxRetries = opts.maxRetries;
     this.userAgent = opts.userAgent;
     this.initialTokenSource = opts.tokenSource ?? "an unknown source";
+    // `web` for every mode, including totp — verified live on 2026-09-04, when a
+    // TOTP typed straight from an authenticator was accepted by both the publish
+    // and the trusted-publisher endpoints with this header set to `web`. npm
+    // validates `npm-otp` on its own and does not consult `npm-auth-type` to do
+    // it. Keeping `web` is then strictly better than `legacy`, because it is
+    // also what makes npm attach {authUrl, doneUrl} to a challenge, which is the
+    // only thing that lets a human recover when the code is missing or wrong.
+    // The override exists because this is npm's negotiation to change, not ours.
+    this.otpAuthType = opts.otpAuthType ?? "web";
     this.fetchImpl = opts.fetch ?? fetch;
     this.logger = opts.logger;
   }
@@ -220,7 +235,7 @@ export class NpmRegistryClient {
           // This pair is what turns a bare 401 into a machine-usable
           // {authUrl, doneUrl} challenge. Omitting it is the easiest way to an
           // unrecoverable "one-time pass required" with nothing to act on.
-          ...(wantsOtp ? { "npm-auth-type": "web", "npm-command": command } : {}),
+          ...(wantsOtp ? { "npm-auth-type": this.otpAuthType, "npm-command": command } : {}),
           ...(otp ? { "npm-otp": otp } : {}),
           ...(hasBody ? { "Content-Type": "application/json" } : {}),
         },
@@ -249,6 +264,7 @@ export class NpmRegistryClient {
           command,
           subject: path,
           identity,
+          challenged: true,
           ...(challenge ? { challenge } : {}),
           ...(opts.otpWait ? { wait: true } : {}),
         });

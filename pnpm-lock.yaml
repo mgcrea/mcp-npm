@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@mgcrea/mcp-totp':
+        specifier: ^0.1.0
+        version: 0.1.0
       '@modelcontextprotocol/server':
         specifier: ^2.0.0
         version: 2.0.0
@@ -203,6 +206,11 @@ packages:
 
   '@jridgewell/sourcemap-codec@1.6.0':
     resolution: {integrity: sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==}
+
+  '@mgcrea/mcp-totp@0.1.0':
+    resolution: {integrity: sha512-TKnll03EKd00jbsyQxrHfu9KNKI/KrCIujbPFaYj6rdish77FUFPTxbLZcL4yLOtm5VYkUG56iqgd4se8G8saQ==}
+    engines: {node: '>=22'}
+    hasBin: true
 
   '@modelcontextprotocol/client@2.0.0':
     resolution: {integrity: sha512-8f1OghQ2rjzIOfqgUCP+8GiUWqRs89njoWLNqAe8kWmDePv3s1fZXseej+QXemssEuuOvLLmLO/kqM3IQHtISw==}
@@ -1410,6 +1418,11 @@ snapshots:
     optional: true
 
   '@jridgewell/sourcemap-codec@1.6.0': {}
+
+  '@mgcrea/mcp-totp@0.1.0':
+    dependencies:
+      '@modelcontextprotocol/server': 2.0.0
+      zod: 4.5.4
 
   '@modelcontextprotocol/client@2.0.0':
     dependencies:

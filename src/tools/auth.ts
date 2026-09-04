@@ -143,7 +143,11 @@ export const registerAuthTools = (
           two_factor: user.ok ? (twoFactorOff ? "disabled" : "enabled") : "unknown",
           writes: config.allowWrites ? "ENABLED" : "disabled",
           otp: {
-            mode: config.otpMode,
+            // The provider's own answer, not `config.otpMode`. The two can
+            // legitimately disagree — setting NPM_OTP selects the static
+            // provider whatever the mode says — and what a caller needs to know
+            // is which flow will actually run.
+            mode: otp.mode,
             cached: otp.cached,
             expires_in_seconds: Math.round(otp.expiresInMs / 1000),
             uses_remaining: otp.usesRemaining,
@@ -159,12 +163,21 @@ export const registerAuthTools = (
           ...(blockers.length > 0 ? { blockers } : {}),
           ...(undetermined.length > 0 ? { undetermined } : {}),
           // Stated even on a healthy server, because it is the constraint people
-          // are most likely to design around wrongly.
+          // are most likely to design around wrongly — and it changes with the
+          // OTP mode, so reporting the generic answer under `totp` would send
+          // someone hunting for a limitation they no longer have.
           note:
-            "npm requires a one-time password on all three trusted-publisher endpoints, the " +
-            "read included, and a code lasts about five minutes. Fully unattended " +
-            "trusted-publisher configuration is therefore not possible; use " +
-            "npm_set_trusted_publisher_batch to spend one authorization across many packages.",
+            otp.mode === "totp"
+              ? "npm requires a one-time password on all three trusted-publisher endpoints, " +
+                "the read included. In totp mode this server mints one locally from a stored " +
+                "seed, so no browser confirmation is needed and batches can run unattended. " +
+                "The trade is that npm's second factor now lives on this machine alongside " +
+                "the token."
+              : "npm requires a one-time password on all three trusted-publisher endpoints, " +
+                "the read included, and a code lasts about five minutes. Fully unattended " +
+                "trusted-publisher configuration is therefore not possible in this mode; use " +
+                "npm_set_trusted_publisher_batch to spend one authorization across many " +
+                "packages, or switch to NPM_OTP_MODE=totp.",
         };
       }),
   );
