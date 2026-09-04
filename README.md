@@ -133,12 +133,20 @@ disk) so `npm_set_trusted_publisher_batch` prompts once for up to 25 packages.
 The flow, when npm asks:
 
 1. A trust call goes out without a code and npm answers `401` with an authorization URL.
-2. The server opens that URL and waits for you to approve it.
-3. The call is retried with the confirmed code, and the code is cached for the window.
+2. **Every trust tool except `npm_auth_otp` fails right there**, with that URL in `authUrl` and
+   a `remedy` explaining the fix. None of them knows whether a human is watching this session, so
+   none of them blocks waiting to find out — an immediate, actionable failure beats a multi-minute
+   hang with nobody to click the link, which is what an earlier version of this server did.
+3. `npm_auth_otp` is the one call that _does_ wait: run it first — with `code` from an
+   authenticator app, or with `package` to open the browser and poll for up to `otpTimeoutMs`
+   (180s default) — and every trust call after it rides the cached code until it expires.
+   `npm_set_trusted_publisher_batch` does this too, once, on the first package only; the other 24
+   ride the same cache, which is the whole mechanism behind its "one prompt" promise.
 
-Run `npm_auth_otp` first if you would rather approve the prompt at a moment of your choosing —
-before a long batch, say. Pass it a `code` from an authenticator app to skip the browser
-entirely, or `open: false` when the browser is on another machine.
+Reach for `npm_auth_otp` before any trust call in a non-interactive or agentic session — there is
+no other way past step 2 there — or whenever you would rather approve the prompt at a moment of
+your choosing. Pass it `code` to skip the browser entirely, or `open: false` when the browser is
+on another machine.
 
 ## Tools
 

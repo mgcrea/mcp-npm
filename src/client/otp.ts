@@ -28,6 +28,19 @@ export type OtpRequest = {
   challenge?: WebOtpChallenge | undefined;
   /** The identity the code will be paired with, so it is never sent under another token. */
   identity: string;
+  /**
+   * Block on `mint()` — open a browser and poll for up to `timeoutMs` — when a
+   * challenge arrives and nothing is cached. Defaults to false.
+   *
+   * False is the right default for a call buried inside some other tool: this
+   * provider has no way to know whether a human is watching, and a multi-minute
+   * hang with nobody to click the link is worse than an immediate failure that
+   * names the URL. `true` is for the few call sites that ARE the deliberate
+   * "wait for a human" moment — `npm_auth_otp`'s own probe, and the first
+   * package of a trusted-publisher batch, which explicitly promises one
+   * browser prompt for the whole run.
+   */
+  wait?: boolean;
 };
 
 export type OtpStatus = {
@@ -40,7 +53,10 @@ export type OtpStatus = {
 export type OtpProvider = {
   /**
    * A code for the `npm-otp` header, or undefined when none can be produced
-   * without a challenge.
+   * without a challenge — OR without a wait nobody asked for. Two different
+   * "no" cases share the one return value on purpose: `request()` reacts to
+   * both identically, by surfacing the challenge in the thrown error rather
+   * than the code.
    *
    * Deliberately NOT symmetric with `TokenProvider.getToken()`, which always
    * yields or throws. `undefined` is what lets `request()` make an un-OTP'd
@@ -296,6 +312,13 @@ export const createWebOtpProvider = (opts: WebOtpProviderOptions): OtpProvider =
         return entry.code;
       }
       if (!req.challenge) return undefined;
+
+      // A challenge with no cached code, and nobody asked this call to wait:
+      // hand back nothing rather than opening a browser and polling for up to
+      // `timeoutMs`. The caller loses nothing by this — request()'s own
+      // otpUnavailable() builds the same authUrl/remedy from the challenge it
+      // already parsed, just without the wait nobody asked for.
+      if (!req.wait) return undefined;
 
       const pending = inflight.get(req.identity);
       if (pending) return pending;

@@ -20,6 +20,13 @@ export type RequestOptions = {
   otp?: OtpMode;
   /** Sent as `npm-command`; only decides the wording on npm's confirmation page. */
   command?: string;
+  /**
+   * Block and open a browser if npm challenges this call and nothing is
+   * cached, instead of failing immediately with the authorization URL.
+   * Defaults to false — see `OtpRequest.wait` for why that is the safe
+   * default and which callers deliberately opt back in.
+   */
+  otpWait?: boolean;
   /** Send no Authorization header at all (the advisories endpoint wants none). */
   anonymous?: boolean;
   /** Override the Accept header, e.g. the abbreviated-packument media type. */
@@ -243,6 +250,7 @@ export class NpmRegistryClient {
           subject: path,
           identity,
           ...(challenge ? { challenge } : {}),
+          ...(opts.otpWait ? { wait: true } : {}),
         });
         // No provider, headless, or a provider handing back the code we just
         // buried. Either way this is no progress, so stop rather than loop.

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { isOtpChallenge, parseWebChallenge } from "#/client/otp";
+import { createWebOtpProvider, isOtpChallenge, parseWebChallenge } from "#/client/otp";
 import {
   connect,
   jsonResponse,
@@ -316,5 +316,92 @@ describe("npm_auth_otp", () => {
     expect(result.ok).toBe(true);
     expect(result.method).toBe("provided");
     expect(harness.callCount()).toBe(0);
+  });
+});
+
+describe("wait: only the deliberate callers block", () => {
+  it("createWebOtpProvider returns undefined immediately when wait is unset, never polling doneUrl", async () => {
+    const fetchMock = vi
+      .fn<() => Promise<Response>>()
+      .mockResolvedValue(jsonResponse({ token: "x" }));
+    const provider = createWebOtpProvider({
+      registry: REGISTRY,
+      fetch: fetchMock,
+      autoOpen: false,
+    });
+
+    const code = await provider.getOtp({
+      command: "trust",
+      identity: "id-1",
+      challenge: {
+        authUrl: "https://www.npmjs.com/auth/cli/x",
+        doneUrl: `${REGISTRY}/-/v1/done?authId=x`,
+      },
+    });
+
+    expect(code).toBeUndefined();
+    // No cached entry existed and wait was never requested, so mint() — the
+    // thing that would call doneUrl — must never run at all.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("createWebOtpProvider still blocks and polls when wait is true", async () => {
+    const fetchMock = vi
+      .fn<() => Promise<Response>>()
+      .mockResolvedValue(jsonResponse({ token: "waited-code" }));
+    const provider = createWebOtpProvider({
+      registry: REGISTRY,
+      fetch: fetchMock,
+      autoOpen: false,
+      pollIntervalMs: 0,
+    });
+
+    const code = await provider.getOtp({
+      command: "trust",
+      identity: "id-2",
+      wait: true,
+      challenge: {
+        authUrl: "https://www.npmjs.com/auth/cli/x",
+        doneUrl: `${REGISTRY}/-/v1/done?authId=x`,
+      },
+    });
+
+    expect(code).toBe("waited-code");
+    expect(fetchMock).toHaveBeenCalledWith(`${REGISTRY}/-/v1/done?authId=x`, expect.anything());
+  });
+
+  it("npm_get_trusted_publisher fails fast against the REAL provider — one fetch, no doneUrl poll", async () => {
+    // No otpProvider override: this is the default createWebOtpProvider(),
+    // exercised through the actual tool rather than a recording mock.
+    const fetchMock = vi.fn<() => Promise<Response>>().mockResolvedValue(otpChallenge());
+    const harness = await connect({ NPM_TOKEN: "t" }, fetchMock);
+
+    const result = await harness.call("npm_get_trusted_publisher", { package: "lodash" });
+
+    expect(result.isToolError).toBe(true);
+    expect(result.authorize_url).toBe("https://www.npmjs.com/auth/cli/test-uuid");
+    // One call for the 401 itself. A blocking wait would have meant a second
+    // (or many) calls to doneUrl before giving up.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("npm_auth_otp still waits and succeeds against the REAL provider", async () => {
+    const fetchMock = vi
+      .fn<(url: string, init?: RequestInit) => Promise<Response>>()
+      .mockImplementation(async (url, init) => {
+        if (url.includes("/-/v1/done")) return jsonResponse({ token: "confirmed-code" });
+        // The bare first attempt gets challenged; the retry that carries the
+        // confirmed code — the whole point of this test — has to succeed, or
+        // registry.ts correctly reads it as a rejected code and invalidates it.
+        const headers = init?.headers as Record<string, string> | undefined;
+        if (headers?.["npm-otp"]) return jsonResponse([]);
+        return otpChallenge();
+      });
+    const harness = await connect({ NPM_TOKEN: "t", NPM_OTP_TIMEOUT_MS: "5000" }, fetchMock);
+
+    const result = await harness.call("npm_auth_otp", { package: "lodash", open: false });
+
+    expect(result.ok).toBe(true);
+    expect(result.method).toBe("web");
   });
 });

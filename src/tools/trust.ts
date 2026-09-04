@@ -186,10 +186,15 @@ const buildClaims = (input: PublisherInput): Rec => {
 const trustPath = (pkg: string): string => `/-/package/${escapePackageName(pkg)}/trust`;
 
 /** npm returns an array even though it permits at most one configuration. */
-const listTrust = async (client: NpmRegistryClient, pkg: string): Promise<TrustConfig[]> => {
+const listTrust = async (
+  client: NpmRegistryClient,
+  pkg: string,
+  otpWait = false,
+): Promise<TrustConfig[]> => {
   const body = await client.get<unknown>(trustPath(pkg), undefined, {
     otp: "auto",
     command: "trust",
+    ...(otpWait ? { otpWait: true } : {}),
   });
   return Array.isArray(body) ? (body.filter(isRecord) as unknown as TrustConfig[]) : [];
 };
@@ -227,9 +232,17 @@ export const applyTrustConfig = async (
   input: PublisherInput,
   replaceExisting: boolean,
   dryRun: boolean,
+  /**
+   * Wait for a human on THIS package's read, if npm challenges it. Only the
+   * batch tool ever sets this, and only for its first package — that read is
+   * the one call that earns the whole run its "one browser prompt" promise;
+   * every call after it, in this package and every one behind it, rides the
+   * cache. A single-package call leaves this false and fails fast instead.
+   */
+  otpWait = false,
 ): Promise<ApplyOutcome> => {
   const claims = buildClaims(input);
-  const existing = (await listTrust(client, pkg))[0];
+  const existing = (await listTrust(client, pkg, otpWait))[0];
 
   if (existing && matches(existing, input.provider, claims, input.permissions)) {
     // Skipping here is what keeps a re-run cheap: without it, twenty-five
@@ -341,9 +354,11 @@ export const registerTrustTools = (
       description:
         "Read which CI workflow npm allows to publish a package without a token. Returns the " +
         "configuration's id — needed to delete it — along with the repository, workflow file " +
-        "and permissions. NOTE: npm requires a one-time password even for this read, so the " +
-        "first call in a session opens a browser confirmation. Answers `configured: false` " +
-        "when the package has no trusted publisher, which is not an error.",
+        "and permissions. NOTE: npm requires a one-time password even for this read. Without a " +
+        "cached one it fails immediately with the authorization URL rather than opening a " +
+        "browser and waiting — call npm_auth_otp first (with `code`, or to approve the browser " +
+        "prompt yourself) to get past that on the first try. Answers `configured: false` when " +
+        "the package has no trusted publisher, which is not an error.",
       inputSchema: z.object({ package: packageArg }),
       annotations: { readOnlyHint: true },
     },
@@ -371,9 +386,10 @@ export const registerTrustTools = (
         "because npm permits only one per package and offers no update endpoint — deletes it " +
         "before creating the replacement when `replace_existing` is set. A configuration that " +
         "already matches is reported as `unchanged` and costs nothing. Requires a one-time " +
-        "password; call npm_auth_otp first if you would rather approve the browser prompt at a " +
-        "moment of your choosing. Use npm_set_trusted_publisher_batch for several packages — " +
-        "it spends one authorization instead of one per package.",
+        "password, and fails immediately with the authorization URL rather than waiting for " +
+        "one — call npm_auth_otp first, with `code` or to approve the browser prompt yourself. " +
+        "Use npm_set_trusted_publisher_batch for several packages — it spends one authorization " +
+        "for the whole run rather than one per package.",
       inputSchema: z
         .object({
           package: packageArg,
@@ -458,7 +474,14 @@ export const registerTrustTools = (
 
           try {
             results.push(
-              await applyTrustConfig(client, pkg, args, args.replace_existing, args.dry_run),
+              await applyTrustConfig(
+                client,
+                pkg,
+                args,
+                args.replace_existing,
+                args.dry_run,
+                index === 0,
+              ),
             );
           } catch (err) {
             const fatal = isFatalForBatch(err);

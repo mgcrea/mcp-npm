@@ -293,6 +293,10 @@ export const registerAuthTools = (
           client.get(`/-/package/${escapePackageName(pkg)}/trust`, undefined, {
             otp: "auto",
             command: "trust",
+            // The one deliberate exception to the fail-fast default: this
+            // tool IS the "wait for a human" moment, called because someone
+            // is here to click the link.
+            otpWait: true,
           }),
         );
         const status = client.otpStatus(identity);

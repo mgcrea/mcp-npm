@@ -50,6 +50,18 @@ describe("npm_set_trusted_publisher", () => {
     });
   });
 
+  it("never asks the OTP provider to wait — a single call fails fast on a challenge instead", async () => {
+    const fetchMock = vi.fn<() => Promise<Response>>().mockResolvedValue(otpChallenge());
+    const otp = recordingOtpProvider();
+    const harness = await connect({ NPM_TOKEN: "t", NPM_ALLOW_WRITES: "1" }, fetchMock, {
+      otpProvider: otp,
+    });
+
+    await harness.call("npm_set_trusted_publisher", { package: "@mgcrea/mcp-ovh", ...GITHUB_ARGS });
+
+    expect(otp.calls.every((c) => c.wait !== true)).toBe(true);
+  });
+
   it("reports `unchanged` and writes nothing when the config already matches", async () => {
     // Without this, re-running a batch would spend three OTP uses per package
     // to change nothing and burn through npm's window.
@@ -210,6 +222,41 @@ describe("npm_set_trusted_publisher_batch", () => {
     expect(result.isToolError).toBeFalsy();
     expect(otp.mints).toBe(1);
     expect((result.summary as Record<string, number>).created).toBe(12);
+  });
+
+  /**
+   * `otp.mints === 1` above proves the mock minted once, but the mock mints on
+   * ANY challenge regardless of `wait` — it cannot tell a correctly-wired batch
+   * from one that asked the real provider to open a browser on package 3 by
+   * mistake. This is the test that actually pins the wiring: exactly the call
+   * that carries the 401's challenge is the one marked `wait: true`, and it is
+   * the only one.
+   */
+  it("marks wait: true on exactly the first package's challenged call", async () => {
+    vi.useFakeTimers();
+    let first = true;
+    const fetchMock = vi.fn<() => Promise<Response>>().mockImplementation(async () => {
+      if (first) {
+        first = false;
+        return otpChallenge();
+      }
+      return jsonResponse([]);
+    });
+    const otp = recordingOtpProvider(["only-code"]);
+    const harness = await connect({ NPM_TOKEN: "t", NPM_ALLOW_WRITES: "1" }, fetchMock, {
+      otpProvider: otp,
+    });
+
+    const pending = harness.call("npm_set_trusted_publisher_batch", {
+      packages: packages.slice(0, 3),
+      ...GITHUB_ARGS,
+    });
+    await vi.advanceTimersByTimeAsync(2000 * 3);
+    await pending;
+
+    const waiting = otp.calls.filter((c) => c.wait === true);
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0]?.challenge).toBeDefined();
   });
 
   it("stops the whole run on a 403, and reports what is left to resume", async () => {
