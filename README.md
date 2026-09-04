@@ -236,6 +236,13 @@ permissions:
 10. **`npm_publish` produces no provenance attestation.** A CI publish over OIDC does. Prefer it.
 11. **npm publishes no rate-limit headers**, and documents no per-endpoint numbers — only that
     5M requests/month is acceptable. Assume nothing; the batch tool paces itself at 2s.
+12. **A successful publish can 404 on the read path for several minutes** — `npm view`,
+    `npm_get_package`, even `registry.npmjs.org` directly. Seen on an ordinary Nth publish, not
+    only the first-publish case in npm-first-publish-bootstrap. The write already landed if the
+    CLI printed `+ <pkg>@<version>` or, for a provenance publish, logged a transparency-log URL
+    (`search.sigstore.dev/?logIndex=...`) — that log entry is independently verifiable and does
+    not depend on npm's own read path at all. A stale read right after publishing is not
+    evidence of failure; poll rather than conclude.
 
 ## Troubleshooting
 

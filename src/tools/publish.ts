@@ -27,7 +27,9 @@ export const registerPublishTools = (
         "requires none. Prefer the CI path — configure it with npm_set_trusted_publisher and " +
         "push a tag. Use this only for a package CI cannot reach. Runs `npm pack` in the " +
         "directory, which executes that package's own prepack/prepare scripts, so do not point " +
-        "it at a directory you have not read. A published version can never be replaced.",
+        "it at a directory you have not read. A published version can never be replaced. A " +
+        "successful publish can 404 on npm_get_package for several minutes afterward — that is " +
+        "registry read-path lag, not a failed write.",
       inputSchema: z.object({
         directory: z
           .string()
