@@ -114,6 +114,30 @@ describe("tool registration", () => {
   });
 });
 
+describe("npm_publish", () => {
+  /**
+   * The default `web` provider refuses to mint without an explicit wait, so a
+   * publish that meets an OTP challenge with an empty cache fails immediately.
+   * That is the right default — nothing here knows whether a human is watching
+   * — but the opt-in has to exist for the session where one is.
+   */
+  it("offers wait_for_otp, off by default", async () => {
+    const harness = await connect({ NPM_TOKEN: "t", NPM_ALLOW_WRITES: "1" });
+    const props = (await harness.tool("npm_publish"))?.inputSchema.properties as Record<
+      string,
+      { default?: unknown }
+    >;
+
+    expect(props.wait_for_otp).toBeDefined();
+    expect(props.wait_for_otp?.default).toBe(false);
+  });
+
+  it("names totp as the unattended path, since no other mode is one", async () => {
+    const harness = await connect({ NPM_TOKEN: "t", NPM_ALLOW_WRITES: "1" });
+    expect((await harness.tool("npm_publish"))?.description).toContain("NPM_OTP_MODE=totp");
+  });
+});
+
 describe("annotations", () => {
   it("marks reads read-only and irreversible writes destructive", async () => {
     const harness = await connect({ NPM_TOKEN: "t", NPM_ALLOW_WRITES: "1" });

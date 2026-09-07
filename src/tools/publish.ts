@@ -97,7 +97,11 @@ export const registerPublishTools = (
         "directory, which executes that package's own prepack/prepare scripts, so do not point " +
         "it at a directory you have not read. A published version can never be replaced. A " +
         "successful publish can 404 on npm_get_package for several minutes afterward — that is " +
-        "registry read-path lag, not a failed write.",
+        "registry read-path lag, not a failed write. If npm demands a one-time password, the " +
+        "only mode that answers one unattended is NPM_OTP_MODE=totp, which mints it locally " +
+        "from a stored seed; in the default `web` mode a publish that meets a challenge with " +
+        "an empty cache fails immediately unless wait_for_otp is set, so call npm_auth_otp " +
+        "first or set that.",
       inputSchema: z.object({
         directory: z
           .string()
@@ -125,11 +129,22 @@ export const registerPublishTools = (
           "Pack the tarball and report exactly what would be published — name, version, size " +
             "and file count — without sending anything to npm. Always worth doing first.",
         ),
+        wait_for_otp: z
+          .boolean()
+          .default(false)
+          .describe(
+            "If npm challenges this publish for a one-time password and none is cached, open " +
+              "its confirmation page and block for up to NPM_OTP_TIMEOUT_MS (180s) waiting for " +
+              "a human to approve it. Off by default, because a multi-minute hang with nobody " +
+              "watching is worse than an immediate failure naming the URL. Set it only in an " +
+              "interactive session; unattended, use NPM_OTP_MODE=totp instead, which needs no " +
+              "browser at all.",
+          ),
         confirm: confirmArg,
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     },
-    async ({ directory, tag, access, dry_run }) =>
+    async ({ directory, tag, access, dry_run, wait_for_otp }) =>
       wrap(async () => {
         // npmBin matters only when npm is not on PATH — which is the normal
         // case for a GUI-spawned server. See resolveNpmCli in client/tarball.ts.
@@ -137,6 +152,7 @@ export const registerPublishTools = (
 
         // Ask before pushing. A version already on npm cannot be replaced, and
         // the error npm returns for a duplicate is far less clear than this.
+        //
         // The failure is kept rather than swallowed. A bare `.catch(() =>
         // undefined)` collapses three different answers — the name is free, the
         // token may not READ this package, the network is down — into one
@@ -176,7 +192,7 @@ export const registerPublishTools = (
           await client.put(
             packumentPath(packed.name),
             buildPublishBody(packed, client.registry, tag, access),
-            { otp: "auto", command: "publish" },
+            { otp: "auto", command: "publish", ...(wait_for_otp ? { otpWait: true } : {}) },
           );
         } catch (err) {
           throw explainPublishFailure(err, packed.name, existing, preflight.error);
