@@ -9,7 +9,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -48,10 +48,18 @@ export const tarballUrl = (registry: string, name: string, version: string): str
   `${registry.replace(/\/+$/, "")}/${name}/-/${tarballFilename(name, version)}`;
 
 export type PackOptions = {
-  /** Injected in tests so nothing shells out. */
-  exec?: (dir: string, destination: string) => Promise<void>;
+  /**
+   * Injected in tests so nothing shells out. Receives the environment the real
+   * child would have been given, which is where the PATH repair below lives.
+   */
+  exec?: (dir: string, destination: string, env: NodeJS.ProcessEnv) => Promise<void>;
   /** An explicit npm CLI path, from NPM_BIN. Wins over every probe below. */
   npmBin?: string | undefined;
+  /**
+   * A pre-resolved CLI, so a test can exercise a layout this machine does not
+   * have. Left unset, `resolveNpmCli` probes as it does in production.
+   */
+  cli?: NpmCli;
 };
 
 /** How npm's CLI will be invoked, and which rule found it (quoted in errors). */
@@ -125,23 +133,108 @@ export const resolveNpmCli = (opts: ResolveNpmCliOptions = {}): NpmCli => {
   return { command: "npm", args: [], source: "PATH" };
 };
 
+/** Quote a path for `/bin/sh`. Paths with a quote in them are rare, not absent. */
+const shellQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
+
+/** A throwaway bin directory holding `npm` and `npx`, and the way to remove it. */
+export type NpmShims = { dir: string; cleanup: () => void };
+
+export type WriteShimOptions = {
+  exists?: (path: string) => boolean;
+  /** Where the directory is created. Overridden in tests. */
+  tmp?: string;
+};
+
 /**
- * PATH for the packing child, with the running Node's directory prepended.
+ * Synthesize a bin directory holding `npm` and `npx`, pointed at the CLI we
+ * already resolved.
+ *
+ * `packEnv` prepending the running Node's directory is not enough on its own,
+ * and the way it fails is worth writing down. Under an app bundle that
+ * directory is `Contents/Resources`, which holds `node` (fine) and an `npm`
+ * that is a **directory** — so bare `npm` does not resolve at all. Prepending
+ * `Resources/npm/bin` instead does not fix it either: the executable shims
+ * there locate npm relative to node's own prefix,
+ *
+ *     CLI_BASEDIR="$("$NODE_EXE" -p 'require("path").dirname(process.execPath)')"
+ *     NPM_PREFIX_JS="$CLI_BASEDIR/node_modules/npm/bin/npm-prefix.js"
+ *
+ * and a flat bundle (`Resources/node` + `Resources/npm`) is not the
+ * `<prefix>/bin/node` + `<prefix>/lib/node_modules/npm` layout they assume, so
+ * they die with "Could not determine Node.js install directory".
+ *
+ * Writing our own shims bypasses prefix detection entirely, at any layout. It
+ * is also exactly why `npm pack` itself already works here — this server
+ * invokes `node npm-cli.js` directly rather than going through those shims.
+ *
+ * Returns undefined when the CLI came from bare `PATH` (or from a non-`.js`
+ * NPM_BIN): there is then no `npm-cli.js` to point at, and whatever PATH
+ * resolved `npm` for us will resolve it for the child too.
+ */
+export const writeNpmShims = (cli: NpmCli, opts: WriteShimOptions = {}): NpmShims | undefined => {
+  const cliPath = cli.args[0];
+  if (!cliPath) return undefined;
+  const exists = opts.exists ?? existsSync;
+
+  const dir = mkdtempSync(join(opts.tmp ?? tmpdir(), "npm-mcp-bin-"));
+  const write = (name: string, target: string): void => {
+    writeFileSync(
+      join(dir, name),
+      `#!/bin/sh\nexec ${shellQuote(cli.command)} ${shellQuote(target)} "$@"\n`,
+      { mode: 0o755 },
+    );
+  };
+
+  write("npm", cliPath);
+  // npx ships beside npm in every layout npm itself produces. Written only when
+  // it is really there — a shim pointing at a missing file turns a clear
+  // "npx: not found" into a confusing exec failure inside our own temp dir.
+  const npxCli = join(dirname(cliPath), "npx-cli.js");
+  if (exists(npxCli)) write("npx", npxCli);
+
+  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+};
+
+export type PackEnvExtras = {
+  /** A directory of synthesized shims, from `writeNpmShims`. Prepended first. */
+  binDir?: string | undefined;
+  /** npm's own entrypoint, exported so a package manager that re-execs agrees. */
+  npmCliPath?: string | undefined;
+};
+
+/**
+ * PATH for the packing child, with the shim directory and the running Node's
+ * directory prepended.
  *
  * `npm pack` runs the package's own prepack/prepare scripts, so this child is
  * about to execute the project's build. Under a bare `/usr/bin:/bin` that build
  * dies the moment it invokes `node`, `tsc` or a package manager — the very next
  * failure after the one being fixed, and indistinguishable from it to anyone
  * reading the error.
+ *
+ * The Node directory alone covers `node` and, on a standard install, `npm`.
+ * `binDir` is what covers the bundle layout, where the Node directory holds no
+ * usable `npm` at all — see `writeNpmShims`.
  */
 export const packEnv = (
   execPath: string = process.execPath,
   env: NodeJS.ProcessEnv = process.env,
+  extras: PackEnvExtras = {},
 ): NodeJS.ProcessEnv => {
-  const execDir = dirname(execPath);
   const current = env.PATH ?? "";
-  const alreadyThere = current.split(delimiter).includes(execDir);
-  return { ...env, PATH: alreadyThere ? current : `${execDir}${delimiter}${current}` };
+  const parts = current.split(delimiter);
+  const prefix = [extras.binDir, dirname(execPath)].filter(
+    (dir): dir is string => Boolean(dir) && !parts.includes(dir as string),
+  );
+
+  return {
+    ...env,
+    PATH: prefix.length ? [...prefix, current].join(delimiter) : current,
+    // So a package manager that re-execs npm, or reads which npm invoked it,
+    // agrees with the shims above rather than probing PATH a second time.
+    ...(extras.npmCliPath ? { npm_execpath: extras.npmCliPath } : {}),
+    npm_node_execpath: execPath,
+  };
 };
 
 /**
@@ -197,16 +290,24 @@ export const packDirectory = async (
   }
 
   const destination = mkdtempSync(join(tmpdir(), "npm-mcp-pack-"));
+  // Resolved even when the exec seam is injected, so a test sees the same
+  // environment a real child would get — the PATH repair below is the part that
+  // has broken twice, and it lives here rather than in the branch that shells out.
+  const cli = opts.cli ?? resolveNpmCli({ npmBin: opts.npmBin });
+  const shims = writeNpmShims(cli);
+  const env = packEnv(process.execPath, process.env, {
+    binDir: shims?.dir,
+    npmCliPath: cli.args[0],
+  });
   try {
     if (opts.exec) {
-      await opts.exec(directory, destination);
+      await opts.exec(directory, destination, env);
     } else {
-      const cli = resolveNpmCli({ npmBin: opts.npmBin });
       try {
         await execFileAsync(
           cli.command,
           [...cli.args, "pack", "--silent", "--pack-destination", destination],
-          { cwd: directory, env: packEnv(), maxBuffer: 64 * 1024 * 1024 },
+          { cwd: directory, env, maxBuffer: 64 * 1024 * 1024 },
         );
       } catch (err) {
         throw npmMissing(err, cli);
@@ -241,6 +342,7 @@ export const packDirectory = async (
     };
   } finally {
     rmSync(destination, { recursive: true, force: true });
+    shims?.cleanup();
   }
 };
 

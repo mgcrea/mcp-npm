@@ -63,5 +63,14 @@ export {
   summarizeTrustConfig,
   summarizeVersion,
 } from "#/client/shape";
-export { buildPublishBody, packDirectory, tarballUrl } from "#/client/tarball";
+export {
+  buildPublishBody,
+  packDirectory,
+  packEnv,
+  resolveNpmCli,
+  tarballUrl,
+  writeNpmShims,
+  type NpmCli,
+  type NpmShims,
+} from "#/client/tarball";
 export { registerTools, type ToolContext } from "#/tools/index";

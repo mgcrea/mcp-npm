@@ -6,6 +6,7 @@ import {
   resolveNpmCli,
   tarballFilename,
   tarballUrl,
+  writeNpmShims,
 } from "#/client/tarball";
 import { connect, jsonResponse } from "#test/helpers";
 
@@ -314,6 +315,70 @@ describe("packEnv", () => {
 
     expect(env.PATH).toBe("/usr/bin:/bin");
   });
+
+  /**
+   * The second failure, one layer past `spawn npm ENOENT`: under an app bundle
+   * the Node directory is `Contents/Resources`, whose `npm` is a DIRECTORY, so
+   * a prepare script that shells out to `npm run build` dies with
+   * `sh: npm: command not found` even though this server packed the tarball
+   * fine. The shim directory has to come first, ahead of the Node directory.
+   */
+  it("puts the shim directory ahead of the Node directory for a bundle layout", () => {
+    const env = packEnv(
+      "/Applications/Bastion.app/Contents/Resources/node",
+      { PATH: "/usr/bin:/bin" },
+      { binDir: "/tmp/npm-mcp-bin-abc", npmCliPath: "/Applications/x/npm/bin/npm-cli.js" },
+    );
+
+    expect(env.PATH).toBe(
+      "/tmp/npm-mcp-bin-abc:/Applications/Bastion.app/Contents/Resources:/usr/bin:/bin",
+    );
+    // So a package manager that re-execs npm agrees with the shims rather than
+    // probing PATH a second time and finding the directory again.
+    expect(env.npm_execpath).toBe("/Applications/x/npm/bin/npm-cli.js");
+    expect(env.npm_node_execpath).toBe("/Applications/Bastion.app/Contents/Resources/node");
+  });
+});
+
+describe("writeNpmShims", () => {
+  const BUNDLE = "/Applications/Bastion.app/Contents/Resources";
+  const CLI = { command: `${BUNDLE}/node`, args: [`${BUNDLE}/npm/bin/npm-cli.js`], source: "x" };
+
+  it("writes executable npm and npx that run the resolved CLI through this Node", async () => {
+    const { readFileSync, statSync } = await import("node:fs");
+    const { join } = await import("node:path");
+
+    const shims = writeNpmShims(CLI, { exists: () => true });
+    expect(shims).toBeDefined();
+
+    const npm = readFileSync(join(shims?.dir as string, "npm"), "utf8");
+    // No prefix detection: that is exactly what npm's own shims do, and what
+    // dies with "Could not determine Node.js install directory" on a flat
+    // bundle where node and npm are siblings.
+    expect(npm).toContain(`exec '${BUNDLE}/node' '${BUNDLE}/npm/bin/npm-cli.js' "$@"`);
+    expect(statSync(join(shims?.dir as string, "npm")).mode & 0o111).toBeTruthy();
+
+    const npx = readFileSync(join(shims?.dir as string, "npx"), "utf8");
+    expect(npx).toContain(`'${BUNDLE}/npm/bin/npx-cli.js'`);
+
+    shims?.cleanup();
+    expect(() => statSync(shims?.dir as string)).toThrow();
+  });
+
+  it("skips npx when it is not beside npm, rather than shimming a missing file", async () => {
+    const { existsSync } = await import("node:fs");
+    const { join } = await import("node:path");
+
+    const shims = writeNpmShims(CLI, { exists: () => false });
+
+    expect(existsSync(join(shims?.dir as string, "npm"))).toBe(true);
+    expect(existsSync(join(shims?.dir as string, "npx"))).toBe(false);
+    shims?.cleanup();
+  });
+
+  it("writes nothing when npm came from bare PATH — there is no npm-cli.js to point at", () => {
+    expect(writeNpmShims({ command: "npm", args: [], source: "PATH" })).toBeUndefined();
+  });
 });
 
 describe("packDirectory", () => {
@@ -363,6 +428,36 @@ describe("packDirectory", () => {
     expect(packed.name).toBe("@mgcrea/demo");
     expect(packed.filename).toBe("demo-1.2.3.tgz");
     expect(Buffer.from(packed.data, "base64").toString()).toBe("scoped-bytes");
+  });
+
+  /**
+   * The child that runs the project's build gets the shims, and gets them back
+   * again on the next call: a directory left behind per publish would be a slow
+   * leak in a long-lived server, and one removed too early would break a
+   * prepare script mid-run.
+   */
+  it("hands the packing child a PATH with the shims, and removes them afterwards", async () => {
+    const { existsSync, mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { delimiter, join } = await import("node:path");
+
+    const dir = mkdtempSync(join(tmpdir(), "npm-mcp-test-"));
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "demo", version: "1.2.3" }));
+
+    const bundle = "/Applications/Bastion.app/Contents/Resources";
+    let binDir: string | undefined;
+    await packDirectory(dir, {
+      cli: { command: `${bundle}/node`, args: [`${bundle}/npm/bin/npm-cli.js`], source: "probe" },
+      exec: async (_dir, destination, env) => {
+        binDir = (env.PATH ?? "").split(delimiter)[0];
+        expect(existsSync(join(binDir as string, "npm"))).toBe(true);
+        expect(env.npm_execpath).toBe(`${bundle}/npm/bin/npm-cli.js`);
+        writeFileSync(join(destination, "demo-1.2.3.tgz"), "bytes");
+      },
+    });
+
+    expect(binDir).toMatch(/npm-mcp-bin-/);
+    expect(existsSync(binDir as string)).toBe(false);
   });
 });
 
