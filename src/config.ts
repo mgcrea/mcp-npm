@@ -17,8 +17,15 @@ export const DEFAULT_DOWNLOADS_BASE_URL = "https://api.npmjs.org";
 export const OTP_MODES = ["web", "static", "totp", "none"] as const;
 export type OtpMode = (typeof OTP_MODES)[number];
 
-/** Where a token came from. Reported by npm_auth_status; never the token itself. */
-export type TokenSource = "environment" | "file" | "npmrc";
+/**
+ * Where a token came from. Reported by npm_auth_status; never the token itself.
+ *
+ * `login` is not a configuration layer: it is a session token obtained by
+ * npm_auth_login and held in memory, which wins over all three while it lives.
+ * `resolveToken` never produces it, which is why it is absent from the schemas
+ * below.
+ */
+export type TokenSource = "environment" | "file" | "npmrc" | "login";
 
 const ConfigSchema = z
   .object({

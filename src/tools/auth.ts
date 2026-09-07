@@ -56,7 +56,11 @@ export const registerAuthTools = (
     async () =>
       wrap(async () => {
         const { config } = ctx;
-        const configured = isConfigured(config);
+        // The live source, not the configured one: npm_auth_login can put a
+        // session token in front of every layer, and a status that still says
+        // "npmrc" is describing a credential no request will actually send.
+        const liveSource = client.currentTokenSource();
+        const configured = isConfigured(config) || liveSource === "login";
         const identity = await client.identity();
         const otp = client.otpStatus(identity);
 
@@ -65,10 +69,14 @@ export const registerAuthTools = (
             configured: false,
             registry: config.registry,
             token_source: null,
-            writes: "disabled",
+            writes: config.allowWrites ? "ENABLED" : "disabled",
             trusted_publishing_available: false,
             blockers: ["No npm token is configured."],
-            available_without_credentials: ["npm_auth_status", "npm_audit_dependencies"],
+            available_without_credentials: [
+              "npm_auth_status",
+              "npm_audit_dependencies",
+              ...(ctx.allowWrites ? ["npm_auth_login"] : []),
+            ],
             setup: setupInstructions(config),
           };
         }
@@ -119,7 +127,7 @@ export const registerAuthTools = (
         return {
           configured: true,
           registry: config.registry,
-          token_source: config.tokenSource ?? null,
+          token_source: liveSource ?? config.tokenSource ?? null,
           // The evidence, not a verdict. These two probes CAN disagree — a token
           // that lists tokens but is refused the account profile is neither
           // cleanly session nor cleanly granular — and a confident one-word
@@ -212,16 +220,88 @@ export const registerAuthTools = (
           ...(result.previousSource !== result.source
             ? { previous_token_source: result.previousSource ?? null }
             : {}),
-          next_step: !result.hasToken
-            ? "Still no token in any layer. Run `npm login`, or set NPM_TOKEN, then call this again."
-            : result.changed
-              ? "The token changed. Call npm_auth_status to confirm npm accepts it."
-              : "The token is byte-for-byte what it was. If calls are still failing 401, the " +
-                "credential itself is the problem rather than a stale copy of it — run " +
-                "`npm login` and call this again.",
+          next_step:
+            result.source === "login"
+              ? "A session token from npm_auth_login is in front of every layer, so this reload " +
+                "changed nothing about what gets sent. It stays until this server process ends; " +
+                "restart to fall back to the configured token."
+              : !result.hasToken
+                ? "Still no token in any layer. Run `npm login`, or set NPM_TOKEN, then call this again."
+                : result.changed
+                  ? "The token changed. Call npm_auth_status to confirm npm accepts it."
+                  : "The token is byte-for-byte what it was. If calls are still failing 401, the " +
+                    "credential itself is the problem rather than a stale copy of it — run " +
+                    "`npm login` and call this again.",
         };
       }),
   );
+
+  // Registered without a token on purpose: this is the one tool whose entire
+  // job is to obtain one, so requiring a working credential to reach it would
+  // close the only door out of an unconfigured server. It is behind the write
+  // gate because it changes what this server can do to npm.
+  if (ctx.allowWrites) {
+    server.registerTool(
+      "npm_auth_login",
+      {
+        title: "npm: Log In",
+        description:
+          "Sign in to npm through the browser and hold the resulting session token IN MEMORY " +
+          "for the life of this server process. Use it when no token is configured, or when " +
+          "the configured one cannot do what you need — a granular token that cannot create a " +
+          "package, say. This is the agent-drivable half of `npm login`: that command needs a " +
+          "terminal with a TTY and, with stdin closed, falls through to a legacy username " +
+          "prompt and exits without writing anything. THE TOKEN IS NOT WRITTEN TO DISK and is " +
+          "never reported back — it dies with this process, and every client of this server " +
+          "shares it until then. Run `npm login` in a terminal, then npm_auth_reload, if you " +
+          "want a durable one in ~/.npmrc. It opens a page and blocks until you approve it " +
+          "there, for up to NPM_OTP_TIMEOUT_MS (180s by default). A session token is also the " +
+          "kind npm accepts most widely: several governance reads and a first publish refuse " +
+          "granular tokens outright. One limit it shares with npm_auth_reload: if this server " +
+          "started with NO token at all, the credentialled tools were never registered, and a " +
+          "login cannot add them — set a token and restart for those.",
+        inputSchema: z.object({
+          open: z
+            .boolean()
+            .default(true)
+            .describe(
+              "Open the sign-in page in a browser. With false, the URL is written to this " +
+                "server's stderr and the call still blocks waiting for it to be approved — so " +
+                "only set it when you can read that log, or when the timeout error (which " +
+                "carries the URL) is an acceptable way to learn it.",
+            ),
+        }),
+        // Nothing on npm changes; what changes is which credential this server
+        // sends. Not idempotent: each call mints another session token.
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+      },
+      async ({ open }) =>
+        wrap(async () => {
+          const { loginUrl, source } = await client.login({
+            autoOpen: open && ctx.config.autoOpenBrowser,
+            timeoutMs: ctx.config.otpTimeoutMs,
+          });
+
+          // Best-effort, and reported either way: a login that npm confirmed
+          // but whose token does not answer /-/whoami is worth seeing now
+          // rather than on the next real call.
+          const who = await probe(() => client.get<{ username?: string }>("/-/whoami"));
+
+          return {
+            ok: true,
+            token_source: source,
+            authorization_url: loginUrl,
+            username: who.ok ? (who.value.username ?? null) : null,
+            ...(who.ok ? {} : { whoami_error: who.reason }),
+            note:
+              "The token is held in memory only, for the life of this server process, and " +
+              "takes precedence over NPM_TOKEN, the config file and ~/.npmrc while it lives. " +
+              "It is never written to disk and never returned. Run `npm login` in a terminal " +
+              "and call npm_auth_reload for one that survives a restart.",
+          };
+        }),
+    );
+  }
 
   if (!ctx.hasCredentials) return;
 

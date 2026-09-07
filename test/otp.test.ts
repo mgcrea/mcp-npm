@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createWebOtpProvider, isOtpChallenge, parseWebChallenge } from "#/client/otp";
 import {
+  CHALLENGE_BODY,
   connect,
   jsonResponse,
   otpChallenge,
@@ -91,6 +92,27 @@ describe("parseWebChallenge", () => {
       doneUrl: "https://npm.internal.example/-/v1/done",
     });
     expect(parseWebChallenge(body, "https://npm.internal.example")).toBeUndefined();
+  });
+
+  /**
+   * `POST /-/v1/login` answers with the same pair under a different name. It
+   * gets the same origin validation for the same reason: the doneUrl hands back
+   * a session credential, which is strictly more valuable than an OTP.
+   */
+  it("accepts loginUrl as an alias for authUrl, with the same origin rules", () => {
+    const body = JSON.stringify({
+      loginUrl: "https://www.npmjs.com/login?next=/login/cli/abc",
+      doneUrl: "https://registry.npmjs.org/-/v1/done?sessionId=abc",
+    });
+    expect(parseWebChallenge(body, REGISTRY)?.authUrl).toBe(
+      "https://www.npmjs.com/login?next=/login/cli/abc",
+    );
+
+    const offHost = JSON.stringify({
+      loginUrl: "https://evil.example.com/login",
+      doneUrl: "https://registry.npmjs.org/-/v1/done",
+    });
+    expect(parseWebChallenge(offHost, REGISTRY)).toBeUndefined();
   });
 
   it("returns undefined for a body that is not a challenge", () => {
@@ -403,5 +425,115 @@ describe("wait: only the deliberate callers block", () => {
 
     expect(result.ok).toBe(true);
     expect(result.method).toBe("web");
+  });
+});
+
+/** npm's login flow end to end: the POST, the poll, then the whoami that follows. */
+const loginFetch = (token = "npm_session_secret") =>
+  vi.fn(async (url: unknown) => {
+    const target = String(url);
+    if (target.endsWith("/-/v1/login")) {
+      return jsonResponse({ loginUrl: CHALLENGE_BODY.authUrl, doneUrl: CHALLENGE_BODY.doneUrl });
+    }
+    if (target.includes("/-/v1/done")) return jsonResponse({ token });
+    if (target.includes("whoami")) return jsonResponse({ username: "mgcrea" });
+    return jsonResponse({});
+  });
+
+describe("npm_auth_login", () => {
+  it("adopts the session token for later calls and never returns it", async () => {
+    const fetchMock = loginFetch();
+    const harness = await connect(
+      { NPM_TOKEN: "stale-token", NPM_ALLOW_WRITES: "1", NPM_AUTO_OPEN_BROWSER: "0" },
+      fetchMock,
+    );
+
+    const result = await harness.call("npm_auth_login", { open: false });
+
+    expect(result.ok).toBe(true);
+    expect(result.username).toBe("mgcrea");
+    expect(result.token_source).toBe("login");
+    // The POST that starts the flow is unauthenticated, exactly as npm's own
+    // client sends it — the whole point is having no usable token yet.
+    const start = harness.requests()[0];
+    expect(start?.init.method).toBe("POST");
+    expect((start?.init.headers as Record<string, string> | undefined)?.Authorization).toBe(
+      undefined,
+    );
+    // A tool result is conversation transcript. A session credential is not
+    // something to write into one, however convenient it would be.
+    expect(JSON.stringify(result)).not.toContain("npm_session_secret");
+
+    // And the point of the whole exercise: the next request carries it, in
+    // preference to the NPM_TOKEN this server started with.
+    const whoami = harness.requests().findIndex((r) => r.url.includes("whoami"));
+    expect(harness.headerAt(whoami, "Authorization")).toBe("Bearer npm_session_secret");
+  });
+
+  it("reports the new source through npm_auth_status", async () => {
+    const harness = await connect(
+      { NPM_TOKEN: "stale-token", NPM_ALLOW_WRITES: "1", NPM_AUTO_OPEN_BROWSER: "0" },
+      loginFetch(),
+    );
+
+    await harness.call("npm_auth_login", { open: false });
+    const status = await harness.call("npm_auth_status");
+
+    // Not "environment": that names a credential no request will now send.
+    expect(status.token_source).toBe("login");
+  });
+
+  it("is not registered when writes are off", async () => {
+    const names = await (await connect({ NPM_TOKEN: "t" })).toolNames();
+    expect(names).not.toContain("npm_auth_login");
+  });
+
+  /**
+   * The bootstrap case this exists for: no token anywhere, so every other
+   * credentialled tool is absent, and the only way out that does not need a
+   * terminal is this one.
+   */
+  it("is offered on a server with no token at all, when writes are enabled", async () => {
+    const harness = await connect({ NPM_ALLOW_WRITES: "1" });
+    expect(await harness.toolNames()).toContain("npm_auth_login");
+
+    const status = await harness.call("npm_auth_status");
+    expect(status.available_without_credentials).toContain("npm_auth_login");
+  });
+
+  it("refuses a login response whose URLs are not npm's", async () => {
+    const fetchMock = vi.fn(async (url: unknown) =>
+      String(url).endsWith("/-/v1/login")
+        ? jsonResponse({
+            loginUrl: "https://evil.example.com/login",
+            doneUrl: "https://evil.example.com/done",
+          })
+        : jsonResponse({}),
+    );
+    const harness = await connect(
+      { NPM_TOKEN: "t", NPM_ALLOW_WRITES: "1", NPM_AUTO_OPEN_BROWSER: "0" },
+      fetchMock,
+    );
+
+    const result = await harness.call("npm_auth_login", { open: false });
+
+    expect(result.isToolError).toBe(true);
+    expect(String(result.error)).toMatch(/no usable authorization URL/);
+    // Nothing was polled: one call, and no browser opened at a URL npm did not
+    // choose.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("explains a registry that has no web login rather than reporting a bare 404", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "Not found" }, { status: 404 }));
+    const harness = await connect(
+      { NPM_TOKEN: "t", NPM_ALLOW_WRITES: "1", NPM_AUTO_OPEN_BROWSER: "0" },
+      fetchMock,
+    );
+
+    const result = await harness.call("npm_auth_login", { open: false });
+
+    expect(result.isToolError).toBe(true);
+    expect(String(result.remedy)).toContain("does not offer the web login flow");
   });
 });

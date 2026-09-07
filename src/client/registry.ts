@@ -1,6 +1,8 @@
 import type { Logger, TokenProvider, TokenReload } from "#/client/auth";
-import { errorDetail, NpmOtpError, NpmRegistryError } from "#/client/errors";
+import { errorDetail, NpmOtpError, NpmRegistryError, PreconditionError } from "#/client/errors";
+import { webLogin, type WebLoginOptions } from "#/client/login";
 import { isOtpChallenge, parseWebChallenge, tokenIdentity, type OtpProvider } from "#/client/otp";
+import type { TokenSource } from "#/config";
 
 export type QueryValue = string | number | boolean | undefined;
 export type Query = Record<string, QueryValue>;
@@ -153,6 +155,44 @@ export class NpmRegistryClient {
    */
   private get tokenSource(): string {
     return this.tokens.source() ?? this.initialTokenSource;
+  }
+
+  /** The same answer for npm_auth_status, without the "unknown source" filler. */
+  currentTokenSource(): TokenSource | undefined {
+    return this.tokens.source();
+  }
+
+  /**
+   * Run npm's browser login flow and adopt the resulting session token.
+   *
+   * The token is held in memory by the provider and is deliberately not
+   * returned: a tool result is conversation transcript, and a session
+   * credential does not belong there.
+   */
+  async login(
+    opts: Omit<WebLoginOptions, "registry" | "userAgent" | "fetch" | "logger"> = {},
+  ): Promise<{ loginUrl: string; source: TokenSource }> {
+    const adopt = this.tokens.adopt;
+    if (!adopt) {
+      throw new PreconditionError(
+        "This server's token provider cannot hold a session token, so a login would have " +
+          "nowhere to go.",
+        {
+          remedy:
+            "Run `npm login` in a terminal and call npm_auth_reload — that writes the token to " +
+            "~/.npmrc, which every provider here can read.",
+        },
+      );
+    }
+    const { token, loginUrl } = await webLogin({
+      registry: this.registry,
+      userAgent: this.userAgent,
+      fetch: this.fetchImpl,
+      ...(this.logger ? { logger: this.logger } : {}),
+      ...opts,
+    });
+    adopt.call(this.tokens, token);
+    return { loginUrl, source: "login" };
   }
 
   /** The OTP cache key for the token currently configured. */

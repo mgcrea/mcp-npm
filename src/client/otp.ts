@@ -144,6 +144,10 @@ const allowedAuthHosts = (registryUrl: URL): Set<string> => {
  * this path into a drive-by browser-open primitive; an unvalidated `doneUrl`
  * hands the OTP to whoever asked. Returning undefined ends the flow with a
  * readable error instead.
+ *
+ * `loginUrl` is accepted as an alias for `authUrl`: npm's `POST /-/v1/login`
+ * answers with the same pair under that name, and the validation it needs is
+ * identical — the same browser launch, the same bearer-equivalent poll.
  */
 export const parseWebChallenge = (
   bodyText: string,
@@ -156,7 +160,12 @@ export const parseWebChallenge = (
     return undefined;
   }
   if (typeof body !== "object" || body === null) return undefined;
-  const { authUrl, doneUrl } = body as { authUrl?: unknown; doneUrl?: unknown };
+  const {
+    authUrl: rawAuthUrl,
+    loginUrl,
+    doneUrl,
+  } = body as { authUrl?: unknown; loginUrl?: unknown; doneUrl?: unknown };
+  const authUrl = typeof rawAuthUrl === "string" ? rawAuthUrl : loginUrl;
   if (typeof authUrl !== "string" || typeof doneUrl !== "string") return undefined;
 
   let registryUrl: URL;
@@ -176,6 +185,56 @@ export const parseWebChallenge = (
   if (done.origin !== registryUrl.origin) return undefined;
 
   return { authUrl: auth.toString(), doneUrl: done.toString() };
+};
+
+export type PollWebTokenOptions = {
+  challenge: WebOtpChallenge;
+  fetch: typeof fetch;
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+  timeoutMs: number;
+  pollIntervalMs: number;
+  /** What is being waited for, quoted in the timeout message. */
+  what: string;
+  /** What to do about a timeout. */
+  remedy: string;
+};
+
+/**
+ * Poll npm's `doneUrl` until it yields a token, bounded by a deadline.
+ *
+ * The same loop serves two different flows — the one-time-password confirmation
+ * and `npm login` — because npm implements them the same way: 202 with an
+ * optional `Retry-After` until the human finishes in the browser, then 200 with
+ * `{token}`. Anything else transient is treated as a 202, since the deadline
+ * rather than the status code is what actually bounds this.
+ */
+export const pollWebToken = async (opts: PollWebTokenOptions): Promise<string> => {
+  const deadline = opts.now() + opts.timeoutMs;
+  for (;;) {
+    if (opts.now() >= deadline) {
+      throw new NpmOtpError(
+        `Timed out after ${Math.round(opts.timeoutMs / 1000)}s waiting for npm to confirm ` +
+          `${opts.what}.`,
+        { status: 401, authUrl: opts.challenge.authUrl, remedy: opts.remedy },
+      );
+    }
+
+    const res = await opts.fetch(opts.challenge.doneUrl, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+
+    if (res.status === 200) {
+      const body = (await res.json().catch(() => undefined)) as { token?: unknown } | undefined;
+      if (typeof body?.token === "string" && body.token) return body.token;
+    }
+
+    const retryAfter = Number(res.headers.get("Retry-After"));
+    await opts.sleep(
+      Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : opts.pollIntervalMs,
+    );
+  }
 };
 
 /** Open a URL in the user's browser. Isolated so tests can pass a spy. */
@@ -267,48 +326,22 @@ export const createWebOtpProvider = (opts: WebOtpProviderOptions): OtpProvider =
       }
     }
 
-    const deadline = now() + timeoutMs;
-    for (;;) {
-      if (now() >= deadline) {
-        throw new NpmOtpError(
-          `Timed out after ${Math.round(timeoutMs / 1000)}s waiting for npm to confirm the ` +
-            `one-time password.`,
-          {
-            status: 401,
-            authUrl: challenge.authUrl,
-            remedy:
-              `Open ${challenge.authUrl} and complete the two-factor confirmation, then retry. ` +
-              `If the browser is on another machine, call npm_auth_otp with open=false and ` +
-              `visit the URL it returns.`,
-          },
-        );
-      }
-
-      const res = await fetchImpl(challenge.doneUrl, {
-        method: "GET",
-        headers: { Accept: "application/json" },
-      });
-
-      if (res.status === 200) {
-        const body = (await res.json().catch(() => undefined)) as { token?: unknown } | undefined;
-        if (typeof body?.token === "string" && body.token) {
-          cache.set(identity, {
-            code: body.token,
-            expiresAt: now() + ttlMs,
-            usesRemaining: maxUses,
-          });
-          opts.logger?.warn?.("one-time password confirmed");
-          return body.token;
-        }
-      }
-
-      // 202 is npm's "still waiting"; anything else transient is treated the
-      // same way, because the deadline above is what actually bounds this loop.
-      const retryAfter = Number(res.headers.get("Retry-After"));
-      await sleep(
-        Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : pollIntervalMs,
-      );
-    }
+    const token = await pollWebToken({
+      challenge,
+      fetch: fetchImpl,
+      now,
+      sleep,
+      timeoutMs,
+      pollIntervalMs,
+      what: "the one-time password",
+      remedy:
+        `Open ${challenge.authUrl} and complete the two-factor confirmation, then retry. ` +
+        `If the browser is on another machine, call npm_auth_otp with open=false and ` +
+        `visit the URL it returns.`,
+    });
+    cache.set(identity, { code: token, expiresAt: now() + ttlMs, usesRemaining: maxUses });
+    opts.logger?.warn?.("one-time password confirmed");
+    return token;
   };
 
   return {

@@ -1,7 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/server";
 
 import { BUILD_INFO } from "#/build-info";
-import { reloadableTokenProvider, type Logger, type TokenProvider } from "#/client/auth";
+import {
+  reloadableTokenProvider,
+  sessionTokenProvider,
+  type Logger,
+  type TokenProvider,
+} from "#/client/auth";
 import {
   createTotpOtpProvider,
   createWebOtpProvider,
@@ -77,8 +82,12 @@ export const createServer = (opts: CreateServerOptions): CreatedServer => {
   // Reloadable, not fixed: the token is the one field that changes underneath a
   // running server, and a server that cannot re-read it answers 401 forever
   // after an `npm login` that visibly worked.
-  const tokenProvider =
-    opts.tokenProvider ?? reloadableTokenProvider(opts.readToken ?? (() => resolveToken()));
+  //
+  // Wrapped so npm_auth_login has somewhere to put a session token — in memory,
+  // preferred over every configured layer, gone when this process is.
+  const tokenProvider = sessionTokenProvider(
+    opts.tokenProvider ?? reloadableTokenProvider(opts.readToken ?? (() => resolveToken())),
+  );
   const otpProvider = opts.otpProvider ?? buildOtpProvider(config, opts);
 
   const client = new NpmRegistryClient({

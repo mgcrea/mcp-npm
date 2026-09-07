@@ -29,6 +29,12 @@ export type TokenProvider = {
   reload(): TokenReload;
   /** Which layer supplied the token currently held. */
   source(): TokenSource | undefined;
+  /**
+   * Take a token obtained at runtime, from npm_auth_login. Optional because
+   * most providers have exactly one origin and nothing to prefer over it;
+   * `sessionTokenProvider` below is what supplies it.
+   */
+  adopt?(token: string): void;
 };
 
 const missingTokenError = (): Error =>
@@ -112,3 +118,38 @@ export const configTokenProvider = (
 
 /** For tests: always yields the same token, with no network. */
 export const staticTokenProvider = (token: string): TokenProvider => configTokenProvider(token);
+
+/**
+ * Wrap a provider so a token from `npm_auth_login` wins over its layers, for
+ * the life of this process and no longer.
+ *
+ * **In memory only, deliberately.** The whole server holds credentials this way
+ * — nothing it obtains is written to disk — and a session token is a durable,
+ * bearer-equivalent credential, so persisting one here would quietly create a
+ * second copy of the user's npm identity beside `~/.npmrc`, outliving reboots
+ * and landing in backups. `npm login` in a terminal is the thing that makes a
+ * token durable, and it already writes exactly one copy.
+ *
+ * `invalidate` reports no change while a session token is held: there is
+ * nothing to re-read, and falling back to the `.npmrc` value npm just refused
+ * would spend the retry budget to arrive at the same 401.
+ */
+export const sessionTokenProvider = (inner: TokenProvider): TokenProvider => {
+  let session: string | undefined;
+
+  return {
+    getToken: async () => session ?? (await inner.getToken()),
+    invalidate: () => (session ? false : inner.invalidate()),
+    reload: () => {
+      const result = inner.reload();
+      // A reload re-reads the layers underneath; it does not discard the
+      // session token, and saying otherwise would misreport what the next
+      // request will actually send.
+      return session ? { ...result, hasToken: true, source: "login" as const } : result;
+    },
+    source: () => (session ? "login" : inner.source()),
+    adopt: (token) => {
+      session = token;
+    },
+  };
+};

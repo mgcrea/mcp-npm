@@ -43,6 +43,7 @@ const READ_TOOLS = [
 const WRITE_TOOLS = [
   "npm_add_dist_tag",
   "npm_add_team_member",
+  "npm_auth_login",
   "npm_create_team",
   "npm_create_token",
   "npm_delete_team",

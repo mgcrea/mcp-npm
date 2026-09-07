@@ -24,16 +24,19 @@ export { authTokenKey, parseNpmrcToken, readNpmrcToken, resolveNpmrcPath } from 
 export {
   configTokenProvider,
   reloadableTokenProvider,
+  sessionTokenProvider,
   staticTokenProvider,
   type Logger,
   type TokenProvider,
   type TokenReload,
 } from "#/client/auth";
+export { webLogin, type WebLoginOptions, type WebLoginResult } from "#/client/login";
 export {
   createWebOtpProvider,
   isOtpChallenge,
   noOtpProvider,
   parseWebChallenge,
+  pollWebToken,
   staticOtpProvider,
   tokenIdentity,
   type OtpProvider,
