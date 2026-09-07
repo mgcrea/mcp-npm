@@ -1,12 +1,80 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
-import { PreconditionError } from "#/client/errors";
+import { NpmRegistryError, PreconditionError } from "#/client/errors";
 import { packumentPath, type NpmRegistryClient } from "#/client/registry";
 import { isRecord, type Rec } from "#/client/shape";
 import { buildPublishBody, packDirectory, tarballFilename } from "#/client/tarball";
 import type { ToolContext } from "#/tools/index";
 import { confirmArg, dryRunArg, packageArg, versionArg, wrap } from "#/tools/util";
+
+/**
+ * Correct the 404-on-write remedy when the package demonstrably already exists.
+ *
+ * `registry.ts` maps every non-GET 404 to the first-publish story — the token
+ * may not CREATE a package here — because that is the case nobody guesses. It
+ * is the wrong story for a package with thirty published versions, and it sends
+ * a maintainer off to check whether they can claim a name they claimed years
+ * ago. Only this tool can tell the two apart, because only this tool has
+ * already read the packument, so the mapping is done here rather than in the
+ * client, where `toError` is private and knows nothing about the package.
+ *
+ * npm answers 404 rather than 403 on a write the token may not perform, which
+ * is what makes both stories look identical from the status code alone.
+ */
+const explainPublishFailure = (
+  err: unknown,
+  name: string,
+  existing: Rec | undefined,
+  preflightError: unknown,
+): unknown => {
+  if (!(err instanceof NpmRegistryError) || err.status !== 404) return err;
+
+  if (existing) {
+    const versions = isRecord(existing.versions) ? Object.keys(existing.versions).length : 0;
+    return new NpmRegistryError(err.message, {
+      status: err.status,
+      errors: err.errors,
+      remedy:
+        `${name} already exists on this registry with ${versions} published ` +
+        `version${versions === 1 ? "" : "s"}, so this is not a create and the name is not the ` +
+        "problem. npm answers 404 on a write the token may not perform, so read this as: this " +
+        "token cannot write THIS package. Two causes account for nearly all of it — a granular " +
+        "access token whose selected-packages list does not include it (or whose scope does " +
+        "not cover it), and a token with 'Bypass 2FA' enabled, which npm no longer accepts for " +
+        "direct publishing even though it still passes reads. Check the token at " +
+        "https://www.npmjs.com/settings/~/tokens, or run npm_auth_login for a session token " +
+        "and retry. npm_auth_status reports which kind this one is.",
+    });
+  }
+
+  // A 404 on the pre-flight READ is npm's ordinary, correct answer for a name
+  // nobody has published: the package really is absent, and registry.ts's
+  // first-publish remedy is exactly right. Reading this as "the read failed, so
+  // we cannot tell" would blur the one case that was already clear.
+  if (preflightError instanceof NpmRegistryError && preflightError.status === 404) return err;
+
+  if (preflightError !== undefined) {
+    const detail =
+      preflightError instanceof Error ? preflightError.message : String(preflightError);
+    return new NpmRegistryError(err.message, {
+      status: err.status,
+      errors: err.errors,
+      remedy:
+        `Whether ${name} already exists could not be established: the pre-flight read failed ` +
+        `too (${detail}). If the package DOES exist, this 404 means the token may not write ` +
+        "that particular package — a granular token that does not name it, or one with " +
+        "'Bypass 2FA' enabled, which npm refuses for direct publishing. If it does not exist, " +
+        "the token may not CREATE a package here. A session token from npm_auth_login (or " +
+        "`npm login` plus npm_auth_reload) settles both; npm_auth_status reports which kind " +
+        "this token is.",
+    });
+  }
+
+  // The packument really is absent: registry.ts's first-publish remedy is the
+  // right one, and rewriting it here would only make it worse.
+  return err;
+};
 
 /** One step of an unpublish, reported by `dry_run` before any of it happens. */
 type Step = { step: string; method: string; path: string; note?: string };
@@ -69,7 +137,16 @@ export const registerPublishTools = (
 
         // Ask before pushing. A version already on npm cannot be replaced, and
         // the error npm returns for a duplicate is far less clear than this.
-        const existing = await client.get<Rec>(packumentPath(packed.name)).catch(() => undefined);
+        // The failure is kept rather than swallowed. A bare `.catch(() =>
+        // undefined)` collapses three different answers — the name is free, the
+        // token may not READ this package, the network is down — into one
+        // `undefined`, and that is precisely the distinction the 404 handling
+        // below needs to tell a first publish from a permission problem.
+        const preflight = await client
+          .get<Rec>(packumentPath(packed.name))
+          .then((packument) => ({ packument, error: undefined }))
+          .catch((error: unknown) => ({ packument: undefined, error }));
+        const existing = preflight.packument;
         if (existing && isRecord(existing.versions) && existing.versions[packed.version]) {
           throw new PreconditionError(
             `${packed.name}@${packed.version} is already published and cannot be replaced.`,
@@ -95,11 +172,15 @@ export const registerPublishTools = (
           };
         }
 
-        await client.put(
-          packumentPath(packed.name),
-          buildPublishBody(packed, client.registry, tag, access),
-          { otp: "auto", command: "publish" },
-        );
+        try {
+          await client.put(
+            packumentPath(packed.name),
+            buildPublishBody(packed, client.registry, tag, access),
+            { otp: "auto", command: "publish" },
+          );
+        } catch (err) {
+          throw explainPublishFailure(err, packed.name, existing, preflight.error);
+        }
 
         return {
           published: true,

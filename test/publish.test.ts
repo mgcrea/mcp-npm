@@ -488,6 +488,57 @@ describe("a first publish, where the package name does not exist yet", () => {
     expect(String(result.remedy)).toContain("npm_auth_reload");
     // And it must not send the reader off to check path escaping.
     expect(String(result.remedy)).not.toContain("fully escaped");
+    // A 404 on the pre-flight READ is npm's correct answer for a free name, so
+    // this case stays the clear one rather than being blurred into "the read
+    // failed too, so which of the two this is cannot be established".
+    expect(String(result.remedy)).not.toContain("could not be established");
+  });
+
+  /**
+   * The sibling case, and the one that cost a whole afternoon: the same 404 on
+   * a package with thirty published versions, whose sole maintainer was the
+   * caller. Told "the token may not CREATE a package here", the reader goes off
+   * to check whether they can claim a name they claimed years ago, while the
+   * actual cause — a token that cannot write THIS package — goes unmentioned.
+   */
+  it("blames the token for THIS package when the package already exists", async () => {
+    const versions = Object.fromEntries(
+      // Anything but this package's own version, which would trip the
+      // "already published" pre-check before the PUT is ever made.
+      Array.from({ length: 30 }, (_, i) => [`9.${i}.0`, { version: `9.${i}.0` }]),
+    );
+    const fetchMock = vi.fn(async (_url: unknown, init?: unknown) => {
+      const method = ((init ?? {}) as RequestInit).method ?? "GET";
+      if (method === "GET") return jsonResponse({ name: "demo", versions });
+      return jsonResponse({ error: "Not found" }, { status: 404 });
+    });
+    const harness = await connect({ NPM_TOKEN: "test-token", NPM_ALLOW_WRITES: "1" }, fetchMock);
+    const result = await harness.call("npm_publish", { directory: process.cwd(), confirm: true });
+
+    expect(result.isToolError).toBe(true);
+    expect(String(result.remedy)).toContain("30 published versions");
+    expect(String(result.remedy)).toContain("cannot write THIS package");
+    // The undocumented half: npm refuses a Bypass-2FA token for direct
+    // publishing, not only for trusted-publisher writes.
+    expect(String(result.remedy)).toContain("Bypass 2FA");
+    // And it must not tell a maintainer of thirty versions to go claim the name.
+    expect(String(result.remedy)).not.toContain("may not CREATE");
+  });
+
+  it("says so when the pre-flight read failed and the package's existence is unknown", async () => {
+    // `.catch(() => undefined)` used to collapse "absent" and "read denied"
+    // into the same answer, which is why this case could not be told apart.
+    const fetchMock = vi.fn(async (_url: unknown, init?: unknown) => {
+      const method = ((init ?? {}) as RequestInit).method ?? "GET";
+      if (method === "GET") return jsonResponse({ error: "Forbidden" }, { status: 403 });
+      return jsonResponse({ error: "Not found" }, { status: 404 });
+    });
+    const harness = await connect({ NPM_TOKEN: "test-token", NPM_ALLOW_WRITES: "1" }, fetchMock);
+    const result = await harness.call("npm_publish", { directory: process.cwd(), confirm: true });
+
+    expect(result.isToolError).toBe(true);
+    expect(String(result.remedy)).toContain("could not be established");
+    expect(String(result.remedy)).toContain("403");
   });
 
   it("keeps the path-shaped remedy for a 404 on a read", async () => {
