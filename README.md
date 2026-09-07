@@ -60,24 +60,25 @@ npm login        # this server reads the resulting ~/.npmrc entry
 npm whoami       # if this answers, you are configured
 ```
 
-| Variable                | Required | Description                                                                                                  |
-| ----------------------- | -------- | ------------------------------------------------------------------------------------------------------------ |
-| `NPM_TOKEN`             | no       | Overrides the `~/.npmrc` lookup. Needed in Docker and CI.                                                    |
-| `NPM_REGISTRY`          | no       | Defaults to `https://registry.npmjs.org`. The `.npmrc` token is looked up for this host.                     |
-| `NPM_DOWNLOADS_URL`     | no       | Defaults to `https://api.npmjs.org`. A different host, never authenticated.                                  |
-| `NPM_ALLOW_WRITES`      | no       | `1` to register the write tools. Off by default.                                                             |
-| `NPM_OTP_MODE`          | no       | `web` (default), `totp`, `static`, or `none`. See [Two-factor](#two-factor).                                 |
-| `NPM_TOTP_LABEL`        | no       | `totp` mode: which seed to read. Defaults to `npm`.                                                          |
-| `NPM_TOTP_SECRET`       | no       | `totp` mode: an `otpauth://` URI or base32 key, instead of the keychain.                                     |
-| `NPM_OTP_AUTH_TYPE`     | no       | Overrides the `npm-auth-type` header. Escape hatch; leave unset.                                             |
-| `NPM_OTP`               | no       | A code. Almost always wrong — see the note in `.env.example`.                                                |
-| `NPM_OTP_TTL_SECONDS`   | no       | How long a confirmed code is reused. Defaults to `300`, npm's own window.                                    |
-| `NPM_OTP_MAX_USES`      | no       | Calls one code covers. Defaults to `80`, npm's own guidance.                                                 |
-| `NPM_AUTO_OPEN_BROWSER` | no       | `0` to print the URL instead of launching a browser.                                                         |
-| `NPM_MAX_RETRIES`       | no       | Retry budget for 429/5xx. Defaults to `3`.                                                                   |
-| `NPM_BIN`               | no       | Path to npm's `npm-cli.js` (or an npm executable), for `npm_publish`. Only needed when npm is not on `PATH`. |
-| `NPM_MCP_CONFIG`        | no       | Path to a JSON config file.                                                                                  |
-| `NPM_DEBUG`             | no       | `1` to log to stderr.                                                                                        |
+| Variable                    | Required | Description                                                                                                  |
+| --------------------------- | -------- | ------------------------------------------------------------------------------------------------------------ |
+| `NPM_TOKEN`                 | no       | Overrides the `~/.npmrc` lookup. Needed in Docker and CI.                                                    |
+| `NPM_REGISTRY`              | no       | Defaults to `https://registry.npmjs.org`. The `.npmrc` token is looked up for this host.                     |
+| `NPM_DOWNLOADS_URL`         | no       | Defaults to `https://api.npmjs.org`. A different host, never authenticated.                                  |
+| `NPM_ALLOW_WRITES`          | no       | `1` to register the write tools. Off by default.                                                             |
+| `NPM_OTP_MODE`              | no       | `web` (default), `totp`, `static`, or `none`. See [Two-factor](#two-factor).                                 |
+| `NPM_TOTP_LABEL`            | no       | `totp` mode: which seed to read. Defaults to `npm`.                                                          |
+| `NPM_TOTP_SECRET`           | no       | `totp` mode: an `otpauth://` URI or base32 key, instead of the keychain.                                     |
+| `NPM_TOTP_KEYCHAIN_SERVICE` | no       | `totp` mode: keychain service holding the seed. Defaults to `com.mgcrea.mcp-totp`.                           |
+| `NPM_OTP_AUTH_TYPE`         | no       | Overrides the `npm-auth-type` header. Escape hatch; leave unset.                                             |
+| `NPM_OTP`                   | no       | A code. Almost always wrong — see the note in `.env.example`.                                                |
+| `NPM_OTP_TTL_SECONDS`       | no       | How long a confirmed code is reused. Defaults to `300`, npm's own window.                                    |
+| `NPM_OTP_MAX_USES`          | no       | Calls one code covers. Defaults to `80`, npm's own guidance.                                                 |
+| `NPM_AUTO_OPEN_BROWSER`     | no       | `0` to print the URL instead of launching a browser.                                                         |
+| `NPM_MAX_RETRIES`           | no       | Retry budget for 429/5xx. Defaults to `3`.                                                                   |
+| `NPM_BIN`                   | no       | Path to npm's `npm-cli.js` (or an npm executable), for `npm_publish`. Only needed when npm is not on `PATH`. |
+| `NPM_MCP_CONFIG`            | no       | Path to a JSON config file.                                                                                  |
+| `NPM_DEBUG`                 | no       | `1` to log to stderr.                                                                                        |
 
 See [.env.example](./.env.example) for the annotated list.
 
@@ -175,6 +176,23 @@ and `web` is what makes npm attach an authorization URL to a challenge, which is
 human recovers from a missing or wrong code. `NPM_OTP_AUTH_TYPE` overrides it if npm ever changes
 how it negotiates.
 
+### Publishing without a human
+
+`npm_publish` meets the same wall, and the same mode gets past it: under `NPM_OTP_MODE=totp` a
+challenged publish mints its code locally and continues. In the default `web` mode it fails
+immediately instead, because the browser provider will not open a page and block unless the call
+asked it to — pass `wait_for_otp: true` when someone is there to click, or run `npm_auth_otp`
+first and let the publish ride the cached code.
+
+The credential half has an escape hatch too. **`npm_auth_login`** runs npm's browser sign-in and
+holds the resulting session token in memory for the life of the server process — never on disk,
+never in a tool result. It exists because `npm login` in a terminal cannot be driven by an agent:
+with stdin at EOF, npm falls through to its legacy `Username:` prompt and exits having written
+nothing. Reach for it when the configured token turns out to be the wrong kind — a granular token
+that cannot create a package, or one whose selected-packages list does not name yours. It is
+behind `NPM_ALLOW_WRITES`, and a token it obtains dies with the process; `npm login` plus
+`npm_auth_reload` is still what makes one durable.
+
 In `web` mode, what _is_ possible is spending one authorization on many packages. npm's confirmation page has a
 same-IP cooldown; this server caches the confirmed code for that window (in memory, never on
 disk) so `npm_set_trusted_publisher_batch` prompts once for up to 25 packages.
@@ -199,11 +217,11 @@ on another machine.
 
 ## Tools
 
-41 tools. **W** = needs `NPM_ALLOW_WRITES=1`; ⚠ = also needs `confirm: true`.
+42 tools. **W** = needs `NPM_ALLOW_WRITES=1`; ⚠ = also needs `confirm: true`.
 
 | Area               | Tools                                                                                                                                                                                                                                              |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Auth               | `npm_auth_status`, `npm_auth_reload`, `npm_auth_otp`, `npm_auth_clear_otp`, `npm_whoami`                                                                                                                                                           |
+| Auth               | `npm_auth_status`, `npm_auth_reload`, `npm_auth_login` **W**, `npm_auth_otp`, `npm_auth_clear_otp`, `npm_whoami`                                                                                                                                   |
 | Trusted publishing | `npm_get_trusted_publisher`, `npm_set_trusted_publisher` **W**, `npm_set_trusted_publisher_batch` **W**, `npm_delete_trusted_publisher` **W**⚠                                                                                                     |
 | Packages           | `npm_get_package`, `npm_get_package_version`, `npm_list_versions`, `npm_search_packages`                                                                                                                                                           |
 | Dist-tags          | `npm_get_dist_tags`, `npm_add_dist_tag` **W**, `npm_remove_dist_tag` **W**⚠                                                                                                                                                                        |
@@ -271,8 +289,12 @@ permissions:
 ## Traps worth knowing
 
 1. **A "Bypass 2FA" granular token is refused by every trust write** (403, pointing at
-   `gh.io/npm-gat-bypass2fa-deprecation`). Reads keep working, so it only surfaces on the write.
-   Create a token without that option, or use a session token from `npm login`.
+   `gh.io/npm-gat-bypass2fa-deprecation`) **and by a direct publish** — npm's own login banner
+   puts "account changes and direct publishing" behind the same restriction. Reads keep working,
+   so it only surfaces on the write. Worse, a publish refused this way answers **404, not 403**,
+   which reads as "no such package". `npm_publish` says so when it has already read the
+   packument and knows the package exists. Create a token without that option, or use a session
+   token from `npm login` (or `npm_auth_login`).
 2. **Two-factor must be on the npm _account_, not just the token.** No token setting substitutes.
 3. **Several governance reads accept only a session token.** `npm_list_tokens`,
    `npm_list_org_members`, `npm_list_collaborators` and `npm_get_package_visibility` refuse a
@@ -319,6 +341,13 @@ tools were never registered, and only a restart adds them.
 
 **`Connection closed` in the client.** Run the binary by hand with the same environment; the
 error the client swallowed is on stderr.
+
+**A publish 404s on a package I have published thirty times.** npm answers 404 rather than 403
+on a write the token may not perform, so this is about the token, not the path. `npm_publish`
+reads the packument first and says which of the two stories applies. The usual causes are a
+granular token whose selected packages do not include this one, and a token with _Bypass 2FA_
+enabled — npm refuses those for direct publishing, not only for trusted-publisher writes.
+`npm_auth_login` gets a session token without leaving the session.
 
 **Every trust call 403s.** Read the `remedy` field on the error. The three causes are a
 `bypass_2fa` token, 2FA not enabled on the account, and not being a maintainer.
